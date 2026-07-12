@@ -283,6 +283,22 @@ tuning now withholds wood labor until both the ordinary working-food floor and
 the emergency reserve are full. In-vivo selection uses food delivery and actual
 road steps rather than rewarding raw road construction.
 
+### A17 — Guarded Retraining V1.2
+
+Marathon training previously promoted a challenger on the fixed-world headline
+score alone. Promotion is now two-stage: only a headline winner pays for a
+13-world paired Community Logistics benchmark, and only a candidate that also
+preserves robust survival, food security, clan-vs-neutral fairness, routing
+entropy, expert coverage, useful transport, reserve activation, and the
+incumbent's causal logistics value may overwrite `champion.bin`. Every rejection
+is appended to the training log with its failed contracts.
+
+A 0.05-hour release-mode trial used all 24 logical cores and completed 33
+generations. Two headline challengers reached the causal gate; both were rejected
+for incumbent regressions (causal logistics value, plus expert coverage for the
+first). The tracked champion's SHA-256 remained unchanged, demonstrating that the
+new path retains the incumbent when no fully qualified winner emerges.
+
 ## Open ideas / next
 
 - **Diplomacy / trade:** friendly clans exchange food; relationship memory; a

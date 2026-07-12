@@ -60,6 +60,10 @@ cargo run --release        # first release build takes a few minutes, then it's 
   measured movement-cost savings distinguish useful infrastructure from activity.
   With logistics disabled, existing roads remain visible but provide no movement
   benefit.
+- **Guarded Retraining V1.2:** a marathon challenger must improve fixed-world
+  quality and then pass a paired logistics-on/off promotion gate. Survival, food
+  security, clan fairness, expert routing, transport value, and reserve use can no
+  longer be traded away for a higher headline score.
 - **Combat**, **food-gated reproduction**, **food memory**, and **one NPC per
   tile**.
 - Game-like **toggleable panels**, an **NPC inspector** (its current "idea"),
@@ -85,11 +89,16 @@ cargo test --release
 cargo test --release ai_quality_benchmark_is_deterministic -- --nocapture
 cargo test --release logistics_ablation_is_deterministic -- --nocapture
 cargo test --release tracked_champion_logistics_preserves_survival_gates -- --nocapture
+cargo test --release champion_promotion -- --nocapture
 ```
 
 The V1.1 tests run paired logistics-on/off worlds with the same brain, seeds, and
 world specifications. Ordinary training does not pay this doubled simulation
 cost; the ablation is an explicit release-validation gate.
+
+Marathon training pays that paired cost only when a fixed-world challenger first
+beats the incumbent. Rejected candidates are logged with concrete reasons and
+never overwrite `champion.bin`.
 
 Current tracked-champion result across 13 paired worlds: initial-clan survival
 **1.000 / 1.000** (enabled/disabled), food security **0.928 / 0.935**, hauling

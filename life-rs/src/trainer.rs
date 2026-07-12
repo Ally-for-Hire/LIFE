@@ -23,6 +23,25 @@ use std::time::Instant;
 /// directory). The app loads this on startup; the marathon trainer writes it.
 pub const CHAMPION_PATH: &str = "champion.bin";
 
+#[cfg(test)]
+const PROMOTION_SURVIVAL_FLOOR: f32 = 0.95;
+#[cfg(test)]
+const PROMOTION_SECURITY_FLOOR: f32 = 0.80;
+#[cfg(test)]
+const PROMOTION_FAIRNESS_FLOOR: f32 = 0.0;
+#[cfg(test)]
+const PROMOTION_ROUTING_FLOOR: f32 = 0.10;
+#[cfg(test)]
+const PROMOTION_EXPERT_COVERAGE_FLOOR: f32 = 0.50;
+#[cfg(test)]
+const PROMOTION_SECURITY_TOLERANCE: f32 = 0.01;
+#[cfg(test)]
+const PROMOTION_ROUTING_TOLERANCE: f32 = 0.02;
+#[cfg(test)]
+const PROMOTION_COVERAGE_TOLERANCE: f32 = 0.05;
+#[cfg(test)]
+const PROMOTION_LOGISTICS_TOLERANCE: f32 = 0.02;
+
 #[derive(Clone)]
 struct QdElite {
     brain: Brain,
@@ -328,6 +347,9 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
     const BENCH_EVERY: u32 = 6;
     const BENCH_WORLDS: usize = 24;
     const BENCH_SEED: u64 = 0xB3E2_5EED_1234_5678;
+    const LOGISTICS_GATE_WORLDS: usize = 13;
+    const LOGISTICS_GATE_EPISODE: i32 = 4000;
+    const LOGISTICS_GATE_SEED: u64 = 0x51FE_BEEF;
     // Append a line and flush it to physical disk, so the log survives a crash
     // or power loss right up to the last completed generation.
     let append = |path: &str, line: &str| {
@@ -385,10 +407,9 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
         }
 
         // King-of-the-hill champion: periodically benchmark the reigning champion
-        // and this generation's best on the SAME fixed worlds, and keep the winner.
-        // Because the benchmark is fixed, the saved champion only improves — never
-        // frozen on an early lucky generation (the bug this run fixes). Saving the
-        // champion is atomic + fsync'd (durable against crash / power loss).
+        // and this generation's best on the SAME fixed worlds. A headline winner
+        // must then pass the paired logistics gate before it can replace the saved
+        // brain. Saving remains atomic + fsync'd (durable against crash / power loss).
         if champion.is_none() || champ_score == f32::MIN || tr.generation % BENCH_EVERY == 0 {
             let base = tr.cfg.arena_params.clone();
             let stage = tr.stage;
@@ -401,16 +422,46 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
             let chal_now = challenger
                 .as_ref()
                 .map(|c| benchmark_quality(c, &base, stage, &hofb, ep, BENCH_WORLDS, BENCH_SEED));
+            let mut gate_result = None;
             match (chal_now, champ_now) {
-                (Some(hq), Some(cq)) if quality_better(&hq, &cq) => {
-                    champion = challenger;
-                    champ_score = hq.fitness;
-                    champ_quality = Some(hq);
-                }
-                (Some(hq), None) => {
-                    champion = challenger;
-                    champ_score = hq.fitness;
-                    champ_quality = Some(hq);
+                (Some(hq), reigning) if reigning.is_none_or(|cq| quality_better(&hq, &cq)) => {
+                    let gate_episode = ep.min(LOGISTICS_GATE_EPISODE).max(1);
+                    let challenger_logistics = benchmark_logistics_quality(
+                        challenger
+                            .as_ref()
+                            .expect("benchmarked challenger should exist"),
+                        &base,
+                        stage,
+                        gate_episode,
+                        LOGISTICS_GATE_WORLDS,
+                        LOGISTICS_GATE_SEED,
+                    );
+                    let reigning_logistics = champion.as_ref().map(|brain| {
+                        benchmark_logistics_quality(
+                            brain,
+                            &base,
+                            stage,
+                            gate_episode,
+                            LOGISTICS_GATE_WORLDS,
+                            LOGISTICS_GATE_SEED,
+                        )
+                    });
+                    let rejections = champion_promotion_rejections(
+                        &hq,
+                        reigning.as_ref(),
+                        &challenger_logistics,
+                        reigning_logistics.as_ref(),
+                    );
+                    let accepted = rejections.is_empty();
+                    gate_result = Some((accepted, rejections, challenger_logistics));
+                    if accepted {
+                        champion = challenger;
+                        champ_score = hq.fitness;
+                        champ_quality = Some(hq);
+                    } else if let Some(cq) = reigning {
+                        champ_score = cq.fitness;
+                        champ_quality = Some(cq);
+                    }
                 }
                 (_, Some(cq)) => {
                     champ_score = cq.fitness;
@@ -442,6 +493,25 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                     tr.stage
                 ),
             );
+            if let Some((accepted, rejections, logistics)) = gate_result {
+                let verdict = if accepted { "accepted" } else { "rejected" };
+                append(
+                    log_path,
+                    &format!(
+                        "    [promotion gate] {verdict}: paired survival {:+.3}, security {:+.3}, haul {:+.3}, roads {:+.3}, reserve use {:+.3}; reasons: {}\n",
+                        logistics.clan_survival_delta,
+                        logistics.security_delta,
+                        logistics.hauling_throughput_delta,
+                        logistics.road_utility_delta,
+                        logistics.reserve_use_delta,
+                        if rejections.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            rejections.join(", ")
+                        },
+                    ),
+                );
+            }
         }
 
         append(
@@ -1492,6 +1562,115 @@ fn quality_better(challenger: &QualityScore, reigning: &QualityScore) -> bool {
     }
 }
 
+#[cfg(test)]
+fn champion_promotion_rejections(
+    challenger: &QualityScore,
+    reigning: Option<&QualityScore>,
+    logistics: &LogisticsBenchmarkReport,
+    reigning_logistics: Option<&LogisticsBenchmarkReport>,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if !challenger.eligible {
+        reasons.push("headline benchmark ineligible");
+    }
+    if challenger.robust_survival < PROMOTION_SURVIVAL_FLOOR {
+        reasons.push("robust survival below promotion floor");
+    }
+    if challenger.security < PROMOTION_SECURITY_FLOOR {
+        reasons.push("food security below promotion floor");
+    }
+    if challenger.fairness < PROMOTION_FAIRNESS_FLOOR {
+        reasons.push("clans underperform neutrals");
+    }
+    if challenger.robust_fairness < FAIRNESS_FLOOR {
+        reasons.push("worst-world fairness below floor");
+    }
+    if challenger.routing_entropy < PROMOTION_ROUTING_FLOOR {
+        reasons.push("routing entropy below floor");
+    }
+    if challenger.expert_coverage < PROMOTION_EXPERT_COVERAGE_FLOOR {
+        reasons.push("expert coverage below floor");
+    }
+
+    if let Some(current) = reigning {
+        if !quality_better(challenger, current) {
+            reasons.push("headline quality did not improve");
+        }
+        if challenger.robust_survival + f32::EPSILON < current.robust_survival {
+            reasons.push("robust survival regressed from champion");
+        }
+        if challenger.security + PROMOTION_SECURITY_TOLERANCE < current.security {
+            reasons.push("food security regressed from champion");
+        }
+        if challenger.fairness + PROMOTION_SECURITY_TOLERANCE < current.fairness {
+            reasons.push("fairness regressed from champion");
+        }
+        if challenger.routing_entropy + PROMOTION_ROUTING_TOLERANCE < current.routing_entropy {
+            reasons.push("routing entropy regressed from champion");
+        }
+        if challenger.expert_coverage + PROMOTION_COVERAGE_TOLERANCE < current.expert_coverage {
+            reasons.push("expert coverage regressed from champion");
+        }
+    }
+
+    if !logistics.enabled.eligible {
+        reasons.push("logistics-enabled benchmark ineligible");
+    }
+    if logistics.enabled.robust_survival < PROMOTION_SURVIVAL_FLOOR {
+        reasons.push("logistics-enabled survival below promotion floor");
+    }
+    if logistics.enabled.mean_security < PROMOTION_SECURITY_FLOOR {
+        reasons.push("logistics-enabled security below promotion floor");
+    }
+    if logistics.enabled.fairness_delta < PROMOTION_FAIRNESS_FLOOR {
+        reasons.push("logistics-enabled clans underperform neutrals");
+    }
+    if logistics.enabled.robust_fairness_delta < FAIRNESS_FLOOR {
+        reasons.push("logistics-enabled worst-world fairness below floor");
+    }
+    if !logistics.survival_non_regression {
+        reasons.push("logistics reduces paired survival");
+    }
+    if logistics.security_delta < -PROMOTION_SECURITY_TOLERANCE {
+        reasons.push("logistics reduces paired food security");
+    }
+    let transport_gain =
+        logistics.hauling_throughput_delta * 0.60 + logistics.road_utility_delta * 0.40;
+    if transport_gain < 0.0 {
+        reasons.push("logistics does not improve paired transport");
+    }
+    if logistics.reserve_use_delta < 0.0 {
+        reasons.push("logistics does not activate the paired reserve");
+    }
+
+    if let Some(current) = reigning_logistics {
+        if logistics.enabled.robust_survival + f32::EPSILON < current.enabled.robust_survival {
+            reasons.push("paired logistics survival regressed from champion");
+        }
+        if logistics.enabled.mean_security + PROMOTION_SECURITY_TOLERANCE
+            < current.enabled.mean_security
+        {
+            reasons.push("paired logistics security regressed from champion");
+        }
+        if logistics.enabled.fairness_delta + PROMOTION_SECURITY_TOLERANCE
+            < current.enabled.fairness_delta
+        {
+            reasons.push("paired logistics fairness regressed from champion");
+        }
+        let candidate_value = promotion_logistics_value(&logistics.enabled);
+        let current_value = promotion_logistics_value(&current.enabled);
+        if candidate_value + PROMOTION_LOGISTICS_TOLERANCE < current_value {
+            reasons.push("causal logistics value regressed from champion");
+        }
+    }
+    reasons
+}
+
+#[cfg(test)]
+fn promotion_logistics_value(arm: &LogisticsBenchmarkArm) -> f32 {
+    arm.hauling_throughput * 0.50 + arm.road_utility * 0.30 + arm.reserve_security * 0.20
+}
+
 /// Fitness from a clan's final state. Kept as a smooth weighted sum (no hard
 /// cliffs) so the gradient is learnable; a wiped-out clan scores 0.
 #[cfg(test)]
@@ -1688,6 +1867,120 @@ mod tests {
             report.security_delta >= -0.01,
             "logistics-enabled food security fell materially below the paired control: {report:#?}"
         );
+    }
+
+    fn promotion_quality(fitness: f32) -> QualityScore {
+        QualityScore {
+            fitness,
+            survival: 1.0,
+            robust_survival: 1.0,
+            security: 0.90,
+            fairness: 0.05,
+            robust_fairness: 0.0,
+            logistics: 0.50,
+            hauling_throughput: 0.50,
+            road_utility: 0.30,
+            reserve_security: 0.60,
+            task_coverage: 0.80,
+            routing_entropy: 0.50,
+            expert_coverage: 0.80,
+            eligible: true,
+            ..QualityScore::default()
+        }
+    }
+
+    fn promotion_logistics(hauling: f32, roads: f32) -> LogisticsBenchmarkReport {
+        let enabled = LogisticsBenchmarkArm {
+            robust_survival: 1.0,
+            mean_security: 0.90,
+            clan_cohort_survival: 1.0,
+            neutral_cohort_survival: 0.95,
+            fairness_delta: 0.05,
+            robust_fairness_delta: 0.0,
+            hauling_throughput: hauling,
+            road_utility: roads,
+            reserve_use: 0.25,
+            reserve_security: 0.60,
+            eligible: true,
+        };
+        let disabled = LogisticsBenchmarkArm {
+            robust_survival: 1.0,
+            mean_security: 0.90,
+            clan_cohort_survival: 1.0,
+            neutral_cohort_survival: 0.95,
+            fairness_delta: 0.05,
+            robust_fairness_delta: 0.0,
+            hauling_throughput: 0.35,
+            road_utility: 0.0,
+            reserve_use: 0.0,
+            reserve_security: 0.0,
+            eligible: true,
+        };
+        LogisticsBenchmarkReport {
+            worlds: 13,
+            hauling_throughput_delta: enabled.hauling_throughput - disabled.hauling_throughput,
+            road_utility_delta: enabled.road_utility - disabled.road_utility,
+            reserve_use_delta: enabled.reserve_use - disabled.reserve_use,
+            reserve_security_delta: enabled.reserve_security - disabled.reserve_security,
+            survival_non_regression: true,
+            enabled,
+            disabled,
+            ..LogisticsBenchmarkReport::default()
+        }
+    }
+
+    #[test]
+    fn champion_promotion_accepts_a_safe_causal_improvement() {
+        let incumbent = promotion_quality(100.0);
+        let challenger = promotion_quality(110.0);
+        let incumbent_logistics = promotion_logistics(0.48, 0.28);
+        let challenger_logistics = promotion_logistics(0.52, 0.32);
+        let rejections = champion_promotion_rejections(
+            &challenger,
+            Some(&incumbent),
+            &challenger_logistics,
+            Some(&incumbent_logistics),
+        );
+        assert!(
+            rejections.is_empty(),
+            "unexpected rejections: {rejections:?}"
+        );
+    }
+
+    #[test]
+    fn champion_promotion_rejects_flashy_survival_regression() {
+        let incumbent = promotion_quality(100.0);
+        let mut challenger = promotion_quality(200.0);
+        challenger.robust_survival = 0.90;
+        let logistics = promotion_logistics(0.52, 0.32);
+        let rejections = champion_promotion_rejections(
+            &challenger,
+            Some(&incumbent),
+            &logistics,
+            Some(&logistics),
+        );
+        assert!(rejections.contains(&"robust survival below promotion floor"));
+        assert!(rejections.contains(&"robust survival regressed from champion"));
+    }
+
+    #[test]
+    fn champion_promotion_rejects_harmful_or_hollow_logistics() {
+        let incumbent = promotion_quality(100.0);
+        let challenger = promotion_quality(110.0);
+        let incumbent_logistics = promotion_logistics(0.50, 0.30);
+        let mut challenger_logistics = promotion_logistics(0.20, 0.0);
+        challenger_logistics.security_delta = -0.02;
+        challenger_logistics.survival_non_regression = false;
+        let rejections = champion_promotion_rejections(
+            &challenger,
+            Some(&incumbent),
+            &challenger_logistics,
+            Some(&incumbent_logistics),
+        );
+        assert!(rejections.contains(&"logistics reduces paired survival"));
+        assert!(rejections.contains(&"logistics reduces paired food security"));
+        assert!(rejections.contains(&"logistics does not improve paired transport"));
+        assert!(rejections.contains(&"causal logistics value regressed from champion"));
     }
 
     #[test]

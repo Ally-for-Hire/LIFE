@@ -45,6 +45,9 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
   infrastructure ablation, no-road-benefit control semantics, food-delivery
   throughput, real road member-steps, and measured movement-cost savings replace
   road-building activity as the evidence needed for causal comparison.
+- **Guarded Retraining V1.2** — marathon champion promotion is fail-closed behind
+  fixed-world quality and paired logistics gates, preserving survival, food
+  security, clan fairness, routing health, transport value, and reserve behavior.
 
 ## Next (civ layers)
 

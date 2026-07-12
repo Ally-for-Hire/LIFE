@@ -78,6 +78,11 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
 - The tracked champion is regression-tested on deterministic fixed worlds. The
   benchmark follows initial clan and neutral cohorts separately so recruitment
   cannot hide a clan-vs-neutral survival regression.
+- Marathon promotion is two-stage. A challenger must first beat the incumbent on
+  the 24 fixed headline worlds, then pass a 13-world paired logistics-on/off gate.
+  The second gate enforces absolute survival/security/fairness/routing floors,
+  incumbent non-regression tolerances, positive transport and reserve effects,
+  and causal logistics-value retention. Only a passing challenger is serialized.
 - Every `World` owns its own `Rng`; there is **no global RNG**. Same seed →
   identical run (covered by a test).
 - `community_logistics=false` is a deterministic infrastructure ablation. Wood
