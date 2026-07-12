@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LIFE</title>
+<style>
+  body {
+    margin: 0;
+    background: #111;
+    color: #ccc;
+    font-family: monospace;
+  }
+  #app {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding: 12px;
+    align-items: flex-start;
+    justify-content: center;
+  }
+  #hud {
+    padding: 6px 0;
+    font-size: 14px;
+  }
+  canvas {
+    image-rendering: pixelated;
+    border: 1px solid #333;
+  }
+  #world {
+    cursor: crosshair;
+  }
+  #sidebar {
+    width: 360px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  section {
+    background: #1a1a1a;
+    border: 1px solid #333;
+    padding: 8px 10px;
+  }
+  h3 {
+    margin: 0 0 8px 0;
+    font-size: 13px;
+    text-transform: uppercase;
+    color: #888;
+  }
+  .btn-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 6px;
+  }
+  button {
+    background: #2a2a2a;
+    color: #ccc;
+    border: 1px solid #444;
+    font-family: monospace;
+    padding: 4px 8px;
+    cursor: pointer;
+  }
+  button:hover { background: #383838; }
+  button.active {
+    background: #3fbf3f;
+    color: #111;
+    border-color: #3fbf3f;
+  }
+  label {
+    display: block;
+    font-size: 12px;
+    margin: 6px 0;
+  }
+  input[type="range"] { width: 100%; }
+  input[type="number"] {
+    width: 70px;
+    background: #2a2a2a;
+    color: #ccc;
+    border: 1px solid #444;
+    font-family: monospace;
+  }
+  #inspector {
+    margin: 0;
+    font-size: 12px;
+    white-space: pre-wrap;
+    color: #aaa;
+    min-height: 40px;
+  }
+  #status {
+    font-size: 12px;
+    color: #3fbf3f;
+    min-height: 16px;
+  }
+  .control-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px 10px;
+  }
+  .control-grid label {
+    margin: 2px 0;
+  }
+  .panel-canvas {
+    width: 100%;
+    height: auto;
+    background: #101010;
+    cursor: default;
+    box-sizing: border-box;
+  }
+  #training-preview {
+    margin-top: 6px;
+  }
+  #fitness-chart {
+    height: 80px;
+    margin-top: 6px;
+  }
+  .progress {
+    height: 8px;
+    background: #101010;
+    border: 1px solid #333;
+    margin-top: 6px;
+  }
+  #train-progress {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: #3fbf3f;
+  }
+  #train-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 2px 8px;
+    margin-top: 6px;
+    font-size: 12px;
+    color: #aaa;
+  }
+  .league-row {
+    display: grid;
+    grid-template-columns: 42px 1fr 58px 64px;
+    gap: 6px;
+    align-items: center;
+    padding: 3px 0;
+    border-bottom: 1px solid #292929;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .league-row:hover {
+    background: #222;
+  }
+  .league-row.active {
+    color: #111;
+    background: #3fbf3f;
+  }
+  .score-bar {
+    height: 5px;
+    background: #333;
+    position: relative;
+  }
+  .score-bar span {
+    display: block;
+    height: 100%;
+    background: #ffd700;
+  }
+  #brain-inspector {
+    margin: 8px 0 0 0;
+    font-size: 12px;
+    white-space: pre-wrap;
+    color: #aaa;
+    min-height: 120px;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="left">
+    <div id="hud">tick: 0</div>
+    <canvas id="world" width="256" height="256"></canvas>
+  </div>
+
+  <div id="sidebar">
+    <section>
+      <h3>Tools</h3>
+      <div class="btn-row" id="tools">
+        <button data-tool="pellet" class="active">1 Pellet</button>
+        <button data-tool="entity">2 Entity</button>
+        <button data-tool="tree">3 Tree</button>
+        <button data-tool="wood">4 Wood</button>
+        <button data-tool="stone">5 Stone</button>
+        <button data-tool="eraser">6 Eraser</button>
+        <button data-tool="inspect">7 Inspect</button>
+      </div>
+      <label>Brush size: <span id="brush-label">1</span>
+        <input type="range" id="brush-size" min="1" max="16" value="1">
+      </label>
+      <div style="font-size:11px;color:#666">left-drag: paint &middot; right-drag: erase</div>
+    </section>
+
+    <section>
+      <h3>Simulation</h3>
+      <div class="btn-row">
+        <button id="btn-pause">Pause</button>
+        <button id="btn-step">Step</button>
+      </div>
+      <label>Speed: <span id="speed-label">1</span> tick/frame
+        <input type="range" id="speed" min="1" max="10" value="1">
+      </label>
+    </section>
+
+    <section>
+      <h3>Neural Training</h3>
+      <div class="btn-row">
+        <button id="btn-train-toggle">Train</button>
+        <button id="btn-train-step">Run Gen</button>
+        <button id="btn-train-reset">Reset League</button>
+        <button id="btn-seed-best">Seed Best</button>
+      </div>
+      <div class="control-grid">
+        <label>Brains <input type="number" id="train-pop" value="16" min="2" max="32"></label>
+        <label>Episode <input type="number" id="train-episode" value="6000" min="500" step="500"></label>
+      </div>
+      <label>Train speed: <span id="train-speed-label">500</span> ticks/frame
+        <input type="range" id="train-speed" min="50" max="2000" step="50" value="500">
+      </label>
+      <div class="progress"><span id="train-progress"></span></div>
+      <div id="train-stats"></div>
+      <canvas id="training-preview" class="panel-canvas" width="128" height="128"></canvas>
+      <canvas id="fitness-chart" class="panel-canvas" width="320" height="80"></canvas>
+    </section>
+
+    <section>
+      <h3>Leader League</h3>
+      <div id="league-list"></div>
+      <pre id="brain-inspector">run training to inspect brain inputs, outputs, and selected actions</pre>
+    </section>
+
+    <section>
+      <h3>Populate</h3>
+      <label>Trees <input type="number" id="pop-pellets" value="55" min="0"></label>
+      <label>Entities <input type="number" id="pop-entities" value="30" min="0"></label>
+      <label>Leaders <input type="number" id="pop-leaders" value="3" min="0"></label>
+      <label>Resources <input type="number" id="pop-resources" value="60" min="0"></label>
+      <label>Wood / stone split: <span id="wood-pct-label">50</span>% wood
+        <input type="range" id="wood-pct" min="0" max="100" value="50">
+      </label>
+      <div class="btn-row">
+        <button id="btn-populate">Populate</button>
+        <button id="btn-clear">Clear World</button>
+      </div>
+    </section>
+
+    <section>
+      <h3>Save / Load</h3>
+      <div class="btn-row">
+        <button id="btn-save">Save</button>
+        <button id="btn-load">Load</button>
+        <button id="btn-export">Export</button>
+        <button id="btn-import">Import</button>
+      </div>
+      <input type="file" id="import-file" accept=".json" hidden>
+      <div id="status"></div>
+    </section>
+
+    <section>
+      <h3>Inspector</h3>
+      <pre id="inspector">use the Inspect tool and click a cell</pre>
+    </section>
+  </div>
+</div>
+
+<script src="js/pellet.js"></script>
+<script src="js/tree.js"></script>
+<script src="js/resource.js"></script>
+<script src="js/stockpile.js"></script>
+<script src="js/task.js"></script>
+<script src="js/brain.js"></script>
+<script src="js/clan.js"></script>
+<script src="js/entity.js"></script>
+<script src="js/world.js"></script>
+<script src="js/trainer.js"></script>
+<script src="js/editor.js"></script>
+<script src="js/main.js"></script>
+</body>
+</html>

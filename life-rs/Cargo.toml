@@ -1,0 +1,22 @@
+[package]
+name = "life-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Native LIFE — a watchable, fast civilization/life simulator with evolving neural leaders."
+
+[dependencies]
+eframe = "0.28"
+egui_plot = "0.28"
+rayon = "1"
+
+# Heavy graphics/UI tree: optimize even in dev so the playground stays smooth.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

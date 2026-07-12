@@ -1,0 +1,21 @@
+# Rust build output
+life-rs/target/
+
+# Generated training history. Keep life-rs/champion.bin as the deployable model.
+life-rs/training-log.txt
+life-rs/champion-stage*.bin
+life-rs/champion-gen*.bin
+life-rs/champion_hour*_backup.bin
+life-rs/*.tmp
+life-rs/test_brain_roundtrip.bin
+
+# Local agent bookkeeping; public attribution lives in the Knowledge Wiki.
+CREDITS.md
+
+# Editor and OS noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
