@@ -74,7 +74,8 @@ Rolling plots of **population & leaders & clans**, **food on the map**, and
 - **Stats:** generation, best/avg/best-ever fitness, robust survival, food and
   reserve security, community logistics, **hauling throughput**, **road utility**,
   task coverage, community care, delivered trade, settlement infrastructure and
-  technology, military readiness, routing/archive health, and last-generation time.
+  technology, military readiness, the MoE specialization composite and five
+  component metrics, archive health, and last-generation time.
 - **Config:** population, episode ticks, clans per arena, repeats, arena size,
   arena trees/neutrals, mutation rate & strength, elite count.
 - **Seed best brain → live world:** inject the current champion as a new clan so

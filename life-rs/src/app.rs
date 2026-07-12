@@ -1215,6 +1215,11 @@ impl eframe::App for LifeApp {
                 .default_width(360.0)
                 .show(ctx, |ui| {
                     let mut t = self.trainer.lock().unwrap();
+                    let specialization_qualifies = t
+                        .best_brain
+                        .as_ref()
+                        .map(crate::quality::contextual_specialization_metrics)
+                        .map(|metrics| metrics.qualifies());
                     let running = self.train_running.load(Ordering::Relaxed);
                     ui.horizontal(|ui| {
                         if ui
@@ -1316,14 +1321,39 @@ impl eframe::App for LifeApp {
                             ui.label("clan fairness floor");
                             ui.label(format!("{:+.0}%", t.fairness_margin * 100.0));
                             ui.end_row();
-                            ui.label("routing balance");
-                            ui.label(format!("{:.0}%", t.routing_balance * 100.0));
+                            ui.label("MoE specialization");
+                            let (status, color) = match specialization_qualifies {
+                                Some(true) => (
+                                    "meets contract",
+                                    egui::Color32::from_rgb(120, 200, 140),
+                                ),
+                                Some(false) => (
+                                    "below contract",
+                                    egui::Color32::from_rgb(225, 190, 90),
+                                ),
+                                None => ("waiting", egui::Color32::GRAY),
+                            };
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{:.0}% · {status}",
+                                    t.specialization_score * 100.0
+                                ))
+                                .color(color),
+                            )
+                            .on_hover_text(format!(
+                                "utilization {:.0}% · decisiveness {:.0}% · context information {:.0}% · top-1 coverage {:.0}% · expert divergence {:.0}%",
+                                t.specialization_utilization_balance * 100.0,
+                                t.specialization_decisiveness * 100.0,
+                                t.specialization_mutual_information * 100.0,
+                                t.specialization_top1_coverage * 100.0,
+                                t.specialization_output_divergence * 100.0,
+                            ));
                             ui.end_row();
                             ui.label("strategy archive");
                             ui.label(format!(
                                 "{} / {} niches",
                                 t.qd_archive_len(),
-                                crate::quality::N_STRATEGY_NICHES
+                                crate::trainer::N_QD_ARCHIVE_SLOTS
                             ));
                             ui.end_row();
                             ui.label("adaptive mutation");

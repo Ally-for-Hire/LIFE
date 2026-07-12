@@ -264,8 +264,7 @@ impl Brain {
 
     /// Each sub-mind's raw proposed action vector for the given situation (for
     /// inspecting specialisation — what each expert "wants" before the gate blend).
-    #[cfg(test)]
-    pub fn expert_outputs(&self, inputs: &[f32; N_IN]) -> Vec<[f32; N_OUT]> {
+    pub(crate) fn expert_outputs(&self, inputs: &[f32; N_IN]) -> Vec<[f32; N_OUT]> {
         self.experts.iter().map(|sm| sm.forward(inputs)).collect()
     }
 

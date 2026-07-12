@@ -87,16 +87,21 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
   CPU cores via rayon** (unlocked), then applies results. The UI reads progress
   through `Arc<Mutex<Trainer>>`.
 - Survival and food security are hard eligibility gates. Eligible brains update
-  a persistent five-niche quality-diversity archive; those specialists are kept
-  in the breeding pool alongside the strongest generalist. Routing entropy and
-  expert coverage provide a small tie-shaping pressure against expert collapse.
+  a persistent six-slot quality-diversity archive: survivor, builder, cooperator,
+  defender, raider, and contextual specialist. Those elites stay in the breeding
+  pool alongside the strongest generalist.
+- MoE quality uses 16 deterministic context probes. Its composite combines
+  balanced expert utilization, decisive per-context routing, normalized
+  context/expert mutual information, top-1 coverage, and output divergence among
+  selected experts. This rejects both uniform soft mixing and one-expert collapse;
+  it shapes selection only after survival/security/fairness eligibility.
 - The tracked champion is regression-tested on deterministic fixed worlds. The
   benchmark follows initial clan and neutral cohorts separately so recruitment
   cannot hide a clan-vs-neutral survival regression.
 - Marathon promotion is two-stage. A challenger must first beat the incumbent on
   the 24 fixed headline worlds, then pass 13-world paired logistics, trade, and
   settlement treatment/control gates.
-  The second gate enforces absolute survival/security/fairness/routing floors,
+  The second gate enforces absolute survival/security/fairness/specialization floors,
   incumbent non-regression tolerances, positive transport and reserve effects,
   causal logistics-value retention, settlement infrastructure, and technology/
   physical-research non-regression. Only a passing challenger is serialized.

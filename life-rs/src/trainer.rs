@@ -9,7 +9,8 @@
 
 use crate::brain::Brain;
 use crate::quality::{
-    routing_metrics, score_clan as score_clan_quality, QualityScore, StrategyNiche, FAIRNESS_FLOOR,
+    contextual_specialization_metrics, routing_metrics, score_clan as score_clan_quality,
+    ContextualSpecializationMetrics, QualityScore, StrategyNiche, FAIRNESS_FLOOR,
     N_STRATEGY_NICHES, SECURITY_FLOOR, SURVIVAL_FLOOR,
 };
 use crate::rng::Rng;
@@ -30,19 +31,18 @@ const PROMOTION_SECURITY_FLOOR: f32 = 0.80;
 #[cfg(test)]
 const PROMOTION_FAIRNESS_FLOOR: f32 = 0.0;
 #[cfg(test)]
-const PROMOTION_ROUTING_FLOOR: f32 = 0.10;
-#[cfg(test)]
-const PROMOTION_EXPERT_COVERAGE_FLOOR: f32 = 0.50;
-#[cfg(test)]
 const PROMOTION_SECURITY_TOLERANCE: f32 = 0.01;
-#[cfg(test)]
-const PROMOTION_ROUTING_TOLERANCE: f32 = 0.02;
 #[cfg(test)]
 const PROMOTION_COVERAGE_TOLERANCE: f32 = 0.05;
 #[cfg(test)]
 const PROMOTION_LOGISTICS_TOLERANCE: f32 = 0.02;
 #[cfg(test)]
 const PROMOTION_TRADE_TOLERANCE: f32 = 0.05;
+#[cfg(test)]
+const PROMOTION_SPECIALIZATION_TOLERANCE: f32 = 0.02;
+
+const SPECIALIST_ARCHIVE_INDEX: usize = N_STRATEGY_NICHES;
+pub const N_QD_ARCHIVE_SLOTS: usize = N_STRATEGY_NICHES + 1;
 
 #[derive(Clone)]
 struct QdElite {
@@ -73,6 +73,12 @@ pub struct AiBenchmarkReport {
     pub mean_military: f32,
     pub routing_entropy: f32,
     pub expert_coverage: f32,
+    pub specialization_score: f32,
+    pub specialization_utilization_balance: f32,
+    pub specialization_decisiveness: f32,
+    pub specialization_mutual_information: f32,
+    pub specialization_top1_coverage: f32,
+    pub specialization_output_divergence: f32,
     pub eligible: bool,
 }
 
@@ -308,6 +314,12 @@ pub struct Trainer {
     pub mean_technology: f32,
     pub mean_military: f32,
     pub routing_balance: f32,
+    pub specialization_score: f32,
+    pub specialization_utilization_balance: f32,
+    pub specialization_decisiveness: f32,
+    pub specialization_mutual_information: f32,
+    pub specialization_top1_coverage: f32,
+    pub specialization_output_divergence: f32,
     pub history: Vec<[f64; 2]>,     // (generation, best fitness)
     pub avg_history: Vec<[f64; 2]>, // (generation, average fitness)
     pub last_gen_ms: f64,
@@ -357,6 +369,12 @@ impl Trainer {
             mean_technology: 0.0,
             mean_military: 0.0,
             routing_balance: 0.0,
+            specialization_score: 0.0,
+            specialization_utilization_balance: 0.0,
+            specialization_decisiveness: 0.0,
+            specialization_mutual_information: 0.0,
+            specialization_top1_coverage: 0.0,
+            specialization_output_divergence: 0.0,
             history: Vec::new(),
             avg_history: Vec::new(),
             last_gen_ms: 0.0,
@@ -364,7 +382,7 @@ impl Trainer {
             stage_best: f32::MIN,
             stage_stall: 0,
             hof: Vec::new(),
-            qd_archive: vec![None; N_STRATEGY_NICHES],
+            qd_archive: vec![None; N_QD_ARCHIVE_SLOTS],
             rng,
         }
     }
@@ -378,7 +396,7 @@ impl Trainer {
     }
 
     pub fn qd_archive_summary(&self) -> Vec<(&'static str, f32)> {
-        StrategyNiche::ALL
+        let mut summary: Vec<(&'static str, f32)> = StrategyNiche::ALL
             .iter()
             .enumerate()
             .filter_map(|(i, niche)| {
@@ -386,7 +404,14 @@ impl Trainer {
                     .as_ref()
                     .map(|elite| (niche.label(), elite.quality.niche_quality(*niche)))
             })
-            .collect()
+            .collect();
+        if let Some(elite) = self.qd_archive[SPECIALIST_ARCHIVE_INDEX].as_ref() {
+            summary.push((
+                "specialist",
+                contextual_specialization_metrics(&elite.brain).specialization_score(),
+            ));
+        }
+        summary
     }
 
     pub fn snapshot_curriculum(&self) -> (u32, Vec<Brain>) {
@@ -646,9 +671,18 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                             0xA11C_BEEF,
                         )
                     });
+                    let challenger_specialization = contextual_specialization_metrics(
+                        challenger
+                            .as_ref()
+                            .expect("benchmarked challenger should exist"),
+                    );
+                    let reigning_specialization =
+                        champion.as_ref().map(contextual_specialization_metrics);
                     let rejections = champion_promotion_rejections(
                         &hq,
                         reigning.as_ref(),
+                        &challenger_specialization,
+                        reigning_specialization.as_ref(),
                         &challenger_logistics,
                         reigning_logistics.as_ref(),
                         &challenger_trade,
@@ -691,7 +725,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
             append(
                 log_path,
                 &format!(
-                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} haul {:.2} roads {:.2} reserve {:.2} tasks {:.2} care {:.2} trade {:.2} infrastructure {:.2} tech {:.2} military {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
+                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} haul {:.2} roads {:.2} reserve {:.2} tasks {:.2} care {:.2} trade {:.2} infrastructure {:.2} tech {:.2} military {:.2} specialization {:.2}/{:.2} on {} fixed worlds (stage {})\n",
                     champ_score,
                     cq.robust_survival,
                     cq.security,
@@ -777,7 +811,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                 tr.robust_survival,
                 tr.fairness_margin,
                 tr.qd_archive_len(),
-                N_STRATEGY_NICHES,
+                N_QD_ARCHIVE_SLOTS,
                 champ_score,
                 tr.hof_len(),
                 ms / 1000.0,
@@ -884,7 +918,17 @@ impl Trainer {
         self.mean_infrastructure = best_quality.infrastructure;
         self.mean_technology = best_quality.technology;
         self.mean_military = best_quality.military;
-        self.routing_balance = best_quality.routing_entropy * best_quality.expert_coverage;
+        let specialization = ranked
+            .get(best_idx)
+            .map(|candidate| contextual_specialization_metrics(&candidate.0))
+            .unwrap_or_default();
+        self.routing_balance = specialization.specialization_score();
+        self.specialization_score = specialization.specialization_score();
+        self.specialization_utilization_balance = specialization.utilization_balance;
+        self.specialization_decisiveness = specialization.decisiveness;
+        self.specialization_mutual_information = specialization.contextual_mutual_information;
+        self.specialization_top1_coverage = specialization.contextual_top1_coverage;
+        self.specialization_output_divergence = specialization.expert_output_divergence;
         let improvement_margin = self.best_ever.abs().max(1.0) * 0.002;
         if self.best_fitness > self.best_ever + improvement_margin {
             self.best_ever = self.best_fitness;
@@ -940,6 +984,52 @@ impl Trainer {
                     quality: *quality,
                 });
             }
+        }
+
+        let specialist = ranked
+            .iter()
+            .filter(|(_, quality)| quality.eligible)
+            .filter_map(|(brain, quality)| {
+                let metrics = contextual_specialization_metrics(brain);
+                metrics.qualifies().then_some((brain, quality, metrics))
+            })
+            .max_by(|a, b| {
+                a.2.specialization_score()
+                    .partial_cmp(&b.2.specialization_score())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| {
+                        a.1.fitness
+                            .partial_cmp(&b.1.fitness)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+            });
+        if let Some((brain, quality, metrics)) = specialist {
+            self.update_specialist_archive(brain, *quality, metrics);
+        }
+    }
+
+    fn update_specialist_archive(
+        &mut self,
+        brain: &Brain,
+        quality: QualityScore,
+        metrics: ContextualSpecializationMetrics,
+    ) {
+        if !quality.eligible || !metrics.qualifies() {
+            return;
+        }
+        let slot = &mut self.qd_archive[SPECIALIST_ARCHIVE_INDEX];
+        let replace = slot.as_ref().is_none_or(|old| {
+            let old_metrics = contextual_specialization_metrics(&old.brain);
+            metrics.specialization_score() > old_metrics.specialization_score() + 0.002
+                || ((metrics.specialization_score() - old_metrics.specialization_score()).abs()
+                    <= 0.002
+                    && quality.fitness > old.quality.fitness)
+        });
+        if replace {
+            *slot = Some(QdElite {
+                brain: brain.clone(),
+                quality,
+            });
         }
     }
 
@@ -1644,6 +1734,7 @@ pub fn benchmark_ai_quality(
     let clan_cohort_survival = clan_survival * inv;
     let neutral_cohort_survival = neutral_survival * inv;
     let fairness_delta = clan_cohort_survival - neutral_cohort_survival;
+    let specialization = contextual_specialization_metrics(brain);
     AiBenchmarkReport {
         worlds: n_worlds,
         mean_fitness: quality.fitness,
@@ -1665,6 +1756,12 @@ pub fn benchmark_ai_quality(
         mean_military: quality.military,
         routing_entropy: quality.routing_entropy,
         expert_coverage: quality.expert_coverage,
+        specialization_score: specialization.specialization_score(),
+        specialization_utilization_balance: specialization.utilization_balance,
+        specialization_decisiveness: specialization.decisiveness,
+        specialization_mutual_information: specialization.contextual_mutual_information,
+        specialization_top1_coverage: specialization.contextual_top1_coverage,
+        specialization_output_divergence: specialization.expert_output_divergence,
         eligible: quality.eligible && fairness_delta >= -0.05,
     }
 }
@@ -2621,6 +2718,8 @@ fn quality_better(challenger: &QualityScore, reigning: &QualityScore) -> bool {
 fn champion_promotion_rejections(
     challenger: &QualityScore,
     reigning: Option<&QualityScore>,
+    specialization: &ContextualSpecializationMetrics,
+    reigning_specialization: Option<&ContextualSpecializationMetrics>,
     logistics: &LogisticsBenchmarkReport,
     reigning_logistics: Option<&LogisticsBenchmarkReport>,
     trade: &TradeBenchmarkReport,
@@ -2646,11 +2745,8 @@ fn champion_promotion_rejections(
     if challenger.robust_fairness < FAIRNESS_FLOOR {
         reasons.push("worst-world fairness below floor");
     }
-    if challenger.routing_entropy < PROMOTION_ROUTING_FLOOR {
-        reasons.push("routing entropy below floor");
-    }
-    if challenger.expert_coverage < PROMOTION_EXPERT_COVERAGE_FLOOR {
-        reasons.push("expert coverage below floor");
+    if !specialization.qualifies() {
+        reasons.push("contextual specialization does not qualify");
     }
 
     if let Some(current) = reigning {
@@ -2666,17 +2762,41 @@ fn champion_promotion_rejections(
         if challenger.fairness + PROMOTION_SECURITY_TOLERANCE < current.fairness {
             reasons.push("fairness regressed from champion");
         }
-        if challenger.routing_entropy + PROMOTION_ROUTING_TOLERANCE < current.routing_entropy {
-            reasons.push("routing entropy regressed from champion");
-        }
-        if challenger.expert_coverage + PROMOTION_COVERAGE_TOLERANCE < current.expert_coverage {
-            reasons.push("expert coverage regressed from champion");
-        }
         if challenger.care + PROMOTION_COVERAGE_TOLERANCE < current.care {
             reasons.push("community care regressed from champion");
         }
         if challenger.trade + PROMOTION_COVERAGE_TOLERANCE < current.trade {
             reasons.push("delivered trade regressed from champion");
+        }
+    }
+
+    if let Some(current) = reigning_specialization {
+        if specialization.specialization_score() + PROMOTION_SPECIALIZATION_TOLERANCE
+            < current.specialization_score()
+        {
+            reasons.push("contextual specialization regressed from champion");
+        }
+        if specialization.utilization_balance + PROMOTION_SPECIALIZATION_TOLERANCE
+            < current.utilization_balance
+        {
+            reasons.push("expert utilization balance regressed from champion");
+        }
+        if specialization.decisiveness + PROMOTION_SPECIALIZATION_TOLERANCE < current.decisiveness {
+            reasons.push("routing decisiveness regressed from champion");
+        }
+        if specialization.contextual_mutual_information + PROMOTION_SPECIALIZATION_TOLERANCE
+            < current.contextual_mutual_information
+        {
+            reasons.push("contextual delegation regressed from champion");
+        }
+        if specialization.contextual_top1_coverage + f32::EPSILON < current.contextual_top1_coverage
+        {
+            reasons.push("contextual expert coverage regressed from champion");
+        }
+        if specialization.expert_output_divergence + PROMOTION_SPECIALIZATION_TOLERANCE
+            < current.expert_output_divergence
+        {
+            reasons.push("expert output divergence regressed from champion");
         }
     }
 
@@ -3003,8 +3123,31 @@ mod tests {
         scores[3].defense = 1.0;
         scores[4].combat = 1.0;
         trainer.finish_general(population, scores, 0.0);
-        assert_eq!(trainer.qd_archive_len(), N_STRATEGY_NICHES);
+        assert!(trainer.qd_archive[..N_STRATEGY_NICHES]
+            .iter()
+            .all(Option::is_some));
         assert_eq!(trainer.population.len(), N_STRATEGY_NICHES);
+    }
+
+    #[test]
+    fn specialist_archive_requires_survival_eligibility_and_specialization() {
+        let cfg = TrainCfg::default();
+        let mut trainer = Trainer::new(cfg);
+        let brain = trainer.population[0].clone();
+        let mut quality = promotion_quality(100.0);
+        quality.eligible = false;
+        trainer.update_specialist_archive(&brain, quality, promotion_specialization());
+        assert!(trainer.qd_archive[SPECIALIST_ARCHIVE_INDEX].is_none());
+
+        quality.eligible = true;
+        let mut collapsed = promotion_specialization();
+        collapsed.contextual_top1_coverage = 0.25;
+        trainer.update_specialist_archive(&brain, quality, collapsed);
+        assert!(trainer.qd_archive[SPECIALIST_ARCHIVE_INDEX].is_none());
+
+        trainer.update_specialist_archive(&brain, quality, promotion_specialization());
+        assert!(trainer.qd_archive[SPECIALIST_ARCHIVE_INDEX].is_some());
+        assert_eq!(trainer.qd_archive_len(), 1);
     }
 
     #[test]
@@ -3028,6 +3171,30 @@ mod tests {
         assert!((a.mean_infrastructure - b.mean_infrastructure).abs() < 1e-6);
         assert!((a.mean_technology - b.mean_technology).abs() < 1e-6);
         assert!((a.mean_military - b.mean_military).abs() < 1e-6);
+        assert!((a.specialization_score - b.specialization_score).abs() < 1e-6);
+        assert!(
+            (a.specialization_utilization_balance - b.specialization_utilization_balance).abs()
+                < 1e-6
+        );
+        assert!((a.specialization_decisiveness - b.specialization_decisiveness).abs() < 1e-6);
+        assert!(
+            (a.specialization_mutual_information - b.specialization_mutual_information).abs()
+                < 1e-6
+        );
+        assert!((a.specialization_top1_coverage - b.specialization_top1_coverage).abs() < 1e-6);
+        assert!(
+            (a.specialization_output_divergence - b.specialization_output_divergence).abs() < 1e-6
+        );
+        for metric in [
+            a.specialization_score,
+            a.specialization_utilization_balance,
+            a.specialization_decisiveness,
+            a.specialization_mutual_information,
+            a.specialization_top1_coverage,
+            a.specialization_output_divergence,
+        ] {
+            assert!((0.0..=1.0).contains(&metric));
+        }
         assert!((0.0..=1.0).contains(&a.routing_entropy));
         assert!((0.0..=1.0).contains(&a.expert_coverage));
         assert!(
@@ -3391,6 +3558,16 @@ mod tests {
         }
     }
 
+    fn promotion_specialization() -> ContextualSpecializationMetrics {
+        ContextualSpecializationMetrics {
+            utilization_balance: 0.80,
+            decisiveness: 0.75,
+            contextual_mutual_information: 0.55,
+            contextual_top1_coverage: 1.0,
+            expert_output_divergence: 0.20,
+        }
+    }
+
     fn promotion_logistics(hauling: f32, roads: f32) -> LogisticsBenchmarkReport {
         let enabled = LogisticsBenchmarkArm {
             robust_survival: 1.0,
@@ -3556,6 +3733,8 @@ mod tests {
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
+            &promotion_specialization(),
+            Some(&promotion_specialization()),
             &challenger_logistics,
             Some(&incumbent_logistics),
             &challenger_trade,
@@ -3572,6 +3751,61 @@ mod tests {
     }
 
     #[test]
+    fn champion_promotion_rejects_non_specialized_router() {
+        let incumbent = promotion_quality(100.0);
+        let challenger = promotion_quality(110.0);
+        let logistics = promotion_logistics(0.52, 0.32);
+        let trade = promotion_trade(0.45, 12.0);
+        let settlement = promotion_settlement(0.34, 8.0);
+        let military = promotion_military(14.0, 3.0, 240.0);
+        let mut collapsed = promotion_specialization();
+        collapsed.contextual_top1_coverage = 0.25;
+        let rejections = champion_promotion_rejections(
+            &challenger,
+            Some(&incumbent),
+            &collapsed,
+            Some(&promotion_specialization()),
+            &logistics,
+            Some(&logistics),
+            &trade,
+            Some(&trade),
+            &settlement,
+            Some(&settlement),
+            &military,
+            Some(&military),
+        );
+        assert!(rejections.contains(&"contextual specialization does not qualify"));
+        assert!(rejections.contains(&"contextual expert coverage regressed from champion"));
+    }
+
+    #[test]
+    fn champion_promotion_rejects_specialization_component_regression() {
+        let quality = promotion_quality(110.0);
+        let logistics = promotion_logistics(0.52, 0.32);
+        let trade = promotion_trade(0.45, 12.0);
+        let settlement = promotion_settlement(0.34, 8.0);
+        let military = promotion_military(14.0, 3.0, 240.0);
+        let incumbent_specialization = promotion_specialization();
+        let mut challenger_specialization = incumbent_specialization;
+        challenger_specialization.expert_output_divergence -= 0.03;
+        let rejections = champion_promotion_rejections(
+            &quality,
+            Some(&quality),
+            &challenger_specialization,
+            Some(&incumbent_specialization),
+            &logistics,
+            Some(&logistics),
+            &trade,
+            Some(&trade),
+            &settlement,
+            Some(&settlement),
+            &military,
+            Some(&military),
+        );
+        assert!(rejections.contains(&"expert output divergence regressed from champion"));
+    }
+
+    #[test]
     fn champion_promotion_rejects_flashy_survival_regression() {
         let incumbent = promotion_quality(100.0);
         let mut challenger = promotion_quality(200.0);
@@ -3583,6 +3817,8 @@ mod tests {
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
+            &promotion_specialization(),
+            Some(&promotion_specialization()),
             &logistics,
             Some(&logistics),
             &trade,
@@ -3610,6 +3846,8 @@ mod tests {
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
+            &promotion_specialization(),
+            Some(&promotion_specialization()),
             &challenger_logistics,
             Some(&incumbent_logistics),
             &trade,
@@ -3638,6 +3876,8 @@ mod tests {
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
+            &promotion_specialization(),
+            Some(&promotion_specialization()),
             &logistics,
             Some(&logistics),
             &challenger_trade,
@@ -3668,6 +3908,8 @@ mod tests {
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
+            &promotion_specialization(),
+            Some(&promotion_specialization()),
             &logistics,
             Some(&logistics),
             &trade,
@@ -3697,6 +3939,8 @@ mod tests {
         let rejections = champion_promotion_rejections(
             &quality,
             Some(&quality),
+            &promotion_specialization(),
+            Some(&promotion_specialization()),
             &logistics,
             Some(&logistics),
             &trade,
@@ -3726,6 +3970,8 @@ mod tests {
         let rejections = champion_promotion_rejections(
             &quality,
             Some(&quality),
+            &promotion_specialization(),
+            Some(&promotion_specialization()),
             &logistics,
             Some(&logistics),
             &trade,
@@ -3755,6 +4001,8 @@ mod tests {
         let rejections = champion_promotion_rejections(
             &quality,
             Some(&quality),
+            &promotion_specialization(),
+            Some(&promotion_specialization()),
             &logistics,
             Some(&logistics),
             &trade,

@@ -13,6 +13,53 @@ pub const SECURITY_FLOOR: f32 = 0.50;
 pub const FAIRNESS_FLOOR: f32 = -0.05;
 pub const N_STRATEGY_NICHES: usize = 5;
 
+const MIN_SPECIALIZATION_UTILIZATION_BALANCE: f32 = 0.55;
+const MIN_SPECIALIZATION_DECISIVENESS: f32 = 0.50;
+const MIN_SPECIALIZATION_MUTUAL_INFORMATION: f32 = 0.25;
+const MIN_SPECIALIZATION_TOP1_COVERAGE: f32 = 0.75;
+const MIN_SPECIALIZATION_OUTPUT_DIVERGENCE: f32 = 0.05;
+
+/// Deterministic evidence that an MoE delegates distinct contexts to distinct,
+/// behaviorally different experts. No single field is sufficient: uniform
+/// mixing, one-expert collapse, and duplicated experts each fail a different
+/// part of this contract.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ContextualSpecializationMetrics {
+    /// Entropy of mean soft expert utilization, normalized to [0,1].
+    pub utilization_balance: f32,
+    /// One minus mean per-context routing entropy, normalized to [0,1].
+    pub decisiveness: f32,
+    /// I(context; expert), normalized by log(expert count).
+    pub contextual_mutual_information: f32,
+    /// Fraction of experts selected top-1 in at least one probe context.
+    pub contextual_top1_coverage: f32,
+    /// Mean pairwise L1 distance between contextually selected experts' raw outputs.
+    pub expert_output_divergence: f32,
+}
+
+impl ContextualSpecializationMetrics {
+    /// Smooth tie-shaping score. A geometric mean makes every required aspect
+    /// matter and returns zero for both uniform mixing and hard single-expert
+    /// collapse. Survival eligibility remains outside this metric.
+    pub fn specialization_score(self) -> f32 {
+        (self.utilization_balance
+            * self.decisiveness
+            * self.contextual_mutual_information
+            * self.contextual_top1_coverage
+            * self.expert_output_divergence)
+            .clamp(0.0, 1.0)
+            .powf(0.2)
+    }
+
+    pub fn qualifies(self) -> bool {
+        self.utilization_balance >= MIN_SPECIALIZATION_UTILIZATION_BALANCE
+            && self.decisiveness >= MIN_SPECIALIZATION_DECISIVENESS
+            && self.contextual_mutual_information >= MIN_SPECIALIZATION_MUTUAL_INFORMATION
+            && self.contextual_top1_coverage >= MIN_SPECIALIZATION_TOP1_COVERAGE
+            && self.expert_output_divergence >= MIN_SPECIALIZATION_OUTPUT_DIVERGENCE
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StrategyNiche {
     Survivor,
@@ -85,7 +132,9 @@ pub struct QualityScore {
     pub military: f32,
     pub defense: f32,
     pub combat: f32,
+    /// Legacy field name: contextual MoE specialization score.
     pub routing_entropy: f32,
+    /// Legacy field name: contextual top-1 expert coverage.
     pub expert_coverage: f32,
     pub eligible: bool,
 }
@@ -179,8 +228,10 @@ impl QualityScore {
                 + ((self.robust_fairness + 1.0) * 0.5).clamp(0.0, 1.0) * 100.0
                 + self.fitness * 0.02;
         }
-        let routing_balance = self.routing_entropy * self.expert_coverage;
-        1_000_000.0 + self.fitness * (0.92 + routing_balance * 0.08)
+        // `routing_entropy` is retained as a compatibility field name, but now
+        // already contains the full contextual-specialization composite. Do not
+        // multiply coverage into it again: coverage is one of its five factors.
+        1_000_000.0 + self.fitness * (0.92 + self.routing_entropy * 0.08)
     }
 }
 
@@ -486,12 +537,106 @@ mod tests {
             "more observed savings must raise utility"
         );
     }
+
+    #[test]
+    fn uniform_routing_is_balanced_but_not_contextually_specialized() {
+        let gates = vec![[1.0 / N_EXPERTS as f32; N_EXPERTS]; 4];
+        let outputs = divergent_expert_outputs(gates.len());
+        let metrics = measure_contextual_specialization(&gates, &outputs);
+
+        assert!(metrics.utilization_balance > 0.99);
+        assert!(metrics.decisiveness < 0.01);
+        assert!(metrics.contextual_mutual_information < 0.01);
+        assert_eq!(metrics.contextual_top1_coverage, 0.25);
+        assert!(!metrics.qualifies());
+    }
+
+    #[test]
+    fn one_expert_collapse_is_decisive_but_not_contextually_specialized() {
+        let gates = vec![[0.997, 0.001, 0.001, 0.001]; 4];
+        let outputs = divergent_expert_outputs(gates.len());
+        let metrics = measure_contextual_specialization(&gates, &outputs);
+
+        assert!(metrics.decisiveness > 0.95);
+        assert!(metrics.utilization_balance < 0.05);
+        assert!(metrics.contextual_mutual_information < 0.01);
+        assert_eq!(metrics.contextual_top1_coverage, 0.25);
+        assert!(!metrics.qualifies());
+    }
+
+    #[test]
+    fn decisive_three_expert_contextual_delegation_qualifies() {
+        let mut gates = vec![[0.01; N_EXPERTS]; 4];
+        for (gate, top1) in gates.iter_mut().zip([0, 1, 2, 0]) {
+            gate[top1] = 0.97;
+        }
+        let outputs = divergent_expert_outputs(gates.len());
+        let metrics = measure_contextual_specialization(&gates, &outputs);
+
+        assert!(metrics.utilization_balance >= MIN_SPECIALIZATION_UTILIZATION_BALANCE);
+        assert!(metrics.decisiveness >= MIN_SPECIALIZATION_DECISIVENESS);
+        assert!(metrics.contextual_mutual_information >= MIN_SPECIALIZATION_MUTUAL_INFORMATION);
+        assert_eq!(metrics.contextual_top1_coverage, 0.75);
+        assert!(metrics.expert_output_divergence > 0.30);
+        assert!(metrics.qualifies());
+    }
+
+    #[test]
+    fn specialization_cannot_bypass_survival_eligibility() {
+        let ineligible = QualityScore {
+            fitness: 10_000.0,
+            routing_entropy: 1.0,
+            expert_coverage: 1.0,
+            eligible: false,
+            ..QualityScore::default()
+        };
+        let eligible = QualityScore {
+            fitness: 1.0,
+            routing_entropy: 0.1,
+            expert_coverage: 0.75,
+            eligible: true,
+            ..QualityScore::default()
+        };
+
+        assert!(ineligible.selection_score() < 1_000_000.0);
+        assert!(eligible.selection_score() >= 1_000_000.0);
+    }
+
+    fn divergent_expert_outputs(contexts: usize) -> Vec<[[f32; crate::brain::N_OUT]; N_EXPERTS]> {
+        let outputs = std::array::from_fn(|expert| {
+            [expert as f32 / (N_EXPERTS - 1) as f32; crate::brain::N_OUT]
+        });
+        vec![outputs; contexts]
+    }
 }
 
-/// Probe routing across representative situations. Entropy measures whether the
-/// gate collapses per decision; coverage measures how many experts receive a
-/// meaningful average share across different situations.
+/// Compatibility projection for the existing trainer integration. The first
+/// value is now the contextual-specialization composite, not routing entropy;
+/// the second is contextual top-1 coverage, not average soft-share coverage.
 pub fn routing_metrics(brain: &Brain) -> (f32, f32) {
+    let metrics = contextual_specialization_metrics(brain);
+    (
+        metrics.specialization_score(),
+        metrics.contextual_top1_coverage,
+    )
+}
+
+/// Probe deterministic representative situations and distinguish genuine
+/// contextual delegation from both uniform mixing and single-expert collapse.
+pub fn contextual_specialization_metrics(brain: &Brain) -> ContextualSpecializationMetrics {
+    let probes = routing_probes();
+    let mut gates = Vec::with_capacity(probes.len());
+    let mut outputs = Vec::with_capacity(probes.len());
+    for probe in &probes {
+        let (_, gate) = brain.evaluate(probe);
+        gates.push(gate);
+        let expert_outputs = brain.expert_outputs(probe);
+        outputs.push(std::array::from_fn(|expert| expert_outputs[expert]));
+    }
+    measure_contextual_specialization(&gates, &outputs)
+}
+
+fn routing_probes() -> [[f32; N_IN]; 16] {
     let mut probes = [[0.0f32; N_IN]; 16];
     for probe in &mut probes {
         probe[0] = 0.30;
@@ -540,19 +685,99 @@ pub fn routing_metrics(brain: &Brain) -> (f32, f32) {
     probes[15][13] = 1.0;
     probes[15][19] = 0.90;
 
-    let mut entropy_sum = 0.0;
+    probes
+}
+
+fn measure_contextual_specialization(
+    gates: &[[f32; N_EXPERTS]],
+    expert_outputs: &[[[f32; crate::brain::N_OUT]; N_EXPERTS]],
+) -> ContextualSpecializationMetrics {
+    if gates.is_empty() || gates.len() != expert_outputs.len() {
+        return ContextualSpecializationMetrics::default();
+    }
+
     let mut mean_gate = [0.0f32; N_EXPERTS];
+    let mut conditional_entropy = 0.0;
+    let mut top1_used = [false; N_EXPERTS];
     let log_n = (N_EXPERTS as f32).ln().max(1e-6);
-    for probe in &probes {
-        let (_, gate) = brain.evaluate(probe);
-        for i in 0..N_EXPERTS {
-            let p = gate[i].max(1e-9);
-            entropy_sum -= p * p.ln() / log_n;
-            mean_gate[i] += gate[i] / probes.len() as f32;
+    let context_weight = 1.0 / gates.len() as f32;
+    for gate in gates {
+        let sum = gate
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite() && *value > 0.0)
+            .sum::<f32>()
+            .max(f32::EPSILON);
+        let mut top1 = 0usize;
+        let mut top1_probability = f32::NEG_INFINITY;
+        for expert in 0..N_EXPERTS {
+            let probability = if gate[expert].is_finite() {
+                gate[expert].max(0.0) / sum
+            } else {
+                0.0
+            };
+            mean_gate[expert] += probability * context_weight;
+            if probability > 0.0 {
+                conditional_entropy -= probability * probability.ln() / log_n * context_weight;
+            }
+            if probability > top1_probability {
+                top1_probability = probability;
+                top1 = expert;
+            }
+        }
+        top1_used[top1] = true;
+    }
+
+    let utilization_balance = normalized_entropy(&mean_gate, log_n);
+    let decisiveness = (1.0 - conditional_entropy).clamp(0.0, 1.0);
+    let contextual_mutual_information = (utilization_balance - conditional_entropy).clamp(0.0, 1.0);
+    let contextual_top1_coverage =
+        top1_used.iter().filter(|&&used| used).count() as f32 / N_EXPERTS as f32;
+
+    let mut divergence_sum = 0.0;
+    let mut divergence_pairs = 0usize;
+    for context_outputs in expert_outputs {
+        for left in 0..N_EXPERTS {
+            if !top1_used[left] {
+                continue;
+            }
+            for right in (left + 1)..N_EXPERTS {
+                if !top1_used[right] {
+                    continue;
+                }
+                let distance = context_outputs[left]
+                    .iter()
+                    .zip(context_outputs[right].iter())
+                    .map(|(a, b)| (a - b).abs())
+                    .sum::<f32>()
+                    / crate::brain::N_OUT as f32;
+                divergence_sum += distance;
+                divergence_pairs += 1;
+            }
         }
     }
-    let entropy = (entropy_sum / probes.len() as f32).clamp(0.0, 1.0);
-    let coverage =
-        mean_gate.iter().filter(|&&share| share >= 0.05).count() as f32 / N_EXPERTS as f32;
-    (entropy, coverage)
+    let expert_output_divergence = if divergence_pairs == 0 {
+        0.0
+    } else {
+        (divergence_sum / divergence_pairs as f32).clamp(0.0, 1.0)
+    };
+
+    ContextualSpecializationMetrics {
+        utilization_balance,
+        decisiveness,
+        contextual_mutual_information,
+        contextual_top1_coverage,
+        expert_output_divergence,
+    }
+}
+
+fn normalized_entropy(distribution: &[f32; N_EXPERTS], log_n: f32) -> f32 {
+    (-distribution
+        .iter()
+        .copied()
+        .filter(|probability| *probability > 0.0)
+        .map(|probability| probability * probability.ln())
+        .sum::<f32>()
+        / log_n)
+        .clamp(0.0, 1.0)
 }

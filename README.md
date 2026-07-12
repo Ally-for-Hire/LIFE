@@ -49,8 +49,8 @@ cargo run --release        # first release build takes a few minutes, then it's 
   flowing into the world automatically.
 - **Survival-gated quality diversity:** extinction cannot be traded for a flashy
   score. Viable brains are preserved in survivor, builder, cooperator, defender,
-  and raider niches, while fixed-world benchmarks guard clan-vs-neutral fairness,
-  food security, and mixture-of-experts routing health.
+  raider, and contextual-specialist niches, while fixed-world benchmarks guard
+  clan-vs-neutral fairness, food security, and mixture-of-experts delegation.
 - **Community Logistics V1:** the leader's six action utilities allocate a sticky,
   simultaneous workforce instead of issuing one village-wide order. Gatherers
   deliver forest wood, expanders turn travelled owned cells into wood-built roads,
@@ -64,6 +64,10 @@ cargo run --release        # first release build takes a few minutes, then it's 
   quality and then pass a paired logistics-on/off promotion gate. Survival, food
   security, clan fairness, expert routing, transport value, and reserve use can no
   longer be traded away for a higher headline score.
+- **Safe MoE Specialization V1:** the trainer distinguishes genuine contextual
+  delegation from both uniform expert mixing and single-expert collapse. Promotion
+  and a sixth archive slot use utilization, decisiveness, context information,
+  top-1 coverage, and expert-output divergence only after survival gates pass.
 - **Community Care V1:** lethal combat incapacitates clan members for a bounded
   rescue window. Nearby Gather/Defend workers abandon routine jobs, reach the
   casualty, physically carry them home, and restore them; untreated wounds bleed

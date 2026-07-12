@@ -374,12 +374,12 @@ fn diag_logistics_ablation() {
     );
 }
 
-/// Probe the trained champion's mixture-of-experts: across representative
-/// situations, show which sub-mind(s) the master routes to and what each expert
-/// proposes — i.e. did the sub-minds specialise, or collapse to one?
+/// Probe the trained champion's mixture-of-experts: show qualitative routing
+/// examples, then report the authoritative contextual-specialization contract.
 #[test]
 fn diag_subminds() {
     use crate::brain::{Brain, N_EXPERTS, N_IN, OUT_LABELS, SUBMIND_LABELS};
+    use crate::quality::contextual_specialization_metrics;
     use crate::trainer::CHAMPION_PATH;
     let champ = match Brain::load(CHAMPION_PATH) {
         Ok(b) => b,
@@ -435,14 +435,10 @@ fn diag_subminds() {
         }),
     ];
     println!("\n== champion sub-mind routing ({N_EXPERTS} experts) ==");
-    let mut gate_sum = vec![0f32; N_EXPERTS];
     for (name, set) in situations.iter() {
         let mut v = base();
         set(&mut v);
         let (out, gate) = champ.evaluate(&v);
-        for i in 0..N_EXPERTS {
-            gate_sum[i] += gate[i];
-        }
         let g: Vec<String> = (0..N_EXPERTS)
             .map(|i| format!("{}:{:.2}", SUBMIND_LABELS[i], gate[i]))
             .collect();
@@ -460,16 +456,23 @@ fn diag_subminds() {
             ex.join(" ")
         );
     }
+    let specialization = contextual_specialization_metrics(&champ);
     println!(
-        "avg gate usage: {}",
-        (0..N_EXPERTS)
-            .map(|i| format!(
-                "{}:{:.2}",
-                SUBMIND_LABELS[i],
-                gate_sum[i] / situations.len() as f32
-            ))
-            .collect::<Vec<_>>()
-            .join("  ")
+        "specialization: {:.2} ({})",
+        specialization.specialization_score(),
+        if specialization.qualifies() {
+            "meets contract"
+        } else {
+            "below contract"
+        }
+    );
+    println!(
+        "  utilization {:.2} · decisiveness {:.2} · context information {:.2} · top-1 coverage {:.2} · expert divergence {:.2}",
+        specialization.utilization_balance,
+        specialization.decisiveness,
+        specialization.contextual_mutual_information,
+        specialization.contextual_top1_coverage,
+        specialization.expert_output_divergence,
     );
 }
 

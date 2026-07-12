@@ -234,6 +234,9 @@ coverage **0.75**.
 The thresholds intentionally freeze today's survival floor while future training
 has room to improve specialization.
 
+These were the original soft-routing metrics. A23 replaces them with the
+contextual-specialization contract and adds the sixth specialist slot.
+
 ### A15 — Community Logistics V1
 
 Clan decisions now turn the unchanged six brain utilities into deterministic,
@@ -298,6 +301,9 @@ generations. Two headline challengers reached the causal gate; both were rejecte
 for incumbent regressions (causal logistics value, plus expert coverage for the
 first). The tracked champion's SHA-256 remained unchanged, demonstrating that the
 new path retains the incumbent when no fully qualified winner emerges.
+
+A23 supersedes the routing-entropy/soft-coverage part of this promotion gate while
+preserving the same survival, security, fairness, and causal-system protections.
 
 ### A18 — Community Care V1
 
@@ -406,6 +412,30 @@ work, 2.9 completed items, 4,070 equipped-member ticks, and 38% same-clan full
 pipeline completion; the disabled arm records zero. Promotion rejects unsafe work,
 hollow pipelines, and incumbent supply/production/ownership loss. The integrated
 release suite passes 96 tests with one ignored marathon.
+
+### A23 — Safe MoE Specialization V1
+
+The old routing-health proxy rewarded mean per-decision entropy multiplied by
+average expert coverage. Its mathematical optimum was a uniform 25/25/25/25 blend
+in every context, so it could score non-specialized mixing as healthy. The trainer
+now evaluates 16 deterministic contexts with five complementary measurements:
+balanced utilization, decisive routing, normalized context/expert mutual
+information, top-1 coverage, and output divergence among selected experts.
+Uniform mixing and one-expert collapse fail separate parts of the contract.
+
+Specialization shapes rank only after the existing survival, food-security, and
+clan-vs-neutral fairness gates. A sixth contextual-specialist archive slot retains
+the strongest qualifying eligible brain, and marathon promotion requires both
+absolute qualification and component-level non-regression. The Training window and
+`diag_subminds` expose the authoritative composite and all five components.
+
+The tracked champion scores **0.59** overall: utilization **0.57**, decisiveness
+**0.88**, context information **0.45**, top-1 coverage **0.75**, and selected-expert
+divergence **0.42**. It therefore meets the initial three-of-four-expert contract;
+this is not a claim of complete four-expert specialization. Its 13-world safety
+baseline remains robust survival **1.000**, food security **0.933**, and clan-vs-
+neutral fairness **+0.024**. The integrated release suite passes 103 tests with one
+ignored marathon.
 
 ## Open ideas / next
 

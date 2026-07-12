@@ -48,6 +48,10 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
 - **Guarded Retraining V1.2** — marathon champion promotion is fail-closed behind
   fixed-world quality plus paired logistics/trade gates, preserving survival, food
   security, clan fairness, routing health, transport value, and reserve behavior.
+- **Safe MoE Specialization V1** — 16 fixed contexts distinguish decisive,
+  behaviorally distinct delegation from uniform mixing and single-expert collapse.
+  A sixth specialist archive slot and champion promotion use the same five-part
+  contract only after survival/security/fairness eligibility.
 - **Community Care V1** — lethal combat creates a bounded rescue window;
   Gather/Defend workers physically carry casualties home, while inactive patients
   are excluded from work, reproduction, hostility, and survival metrics.
@@ -80,6 +84,6 @@ complete. Further work belongs in a new roadmap cycle rather than this milestone
 - **Spatial index** — combat and target search currently rebuild a per-tick
   occupancy hashmap and do bounded scans. If populations grow large, switch to a
   cell-bucketed spatial hash for neighbor queries.
-- **Quality diversity** — the five-niche archive is intentionally compact. Add
+- **Quality diversity** — the six-slot archive is intentionally compact. Add
   richer behavior descriptors only when new economy/diplomacy mechanics create
   genuinely distinct strategic axes.
