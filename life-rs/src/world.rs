@@ -101,14 +101,14 @@ pub struct Params {
     pub claim_interval: i32,
     pub members_per_claim: i32,
     // farming / settlement
-    pub farm_interval: i32,    // ticks between farm growth passes on owned land
-    pub farm_yield: f32,       // per owned fertile tile, pellet-spawn chance per pass (×fertility)
-    pub home_range: i32,       // how far workers roam from the stockpile while working
+    pub farm_interval: i32, // ticks between farm growth passes on owned land
+    pub farm_yield: f32,    // per owned fertile tile, pellet-spawn chance per pass (×fertility)
+    pub home_range: i32,    // how far workers roam from the stockpile while working
     pub expand_claim_radius: i32, // radius of a single worker land claim while expanding
-    pub season_length: i32,    // ticks per full season cycle (0 = seasons off)
-    pub season_amp: f32,       // yield swing amplitude (0..1); 0 = no seasonal variation
+    pub season_length: i32, // ticks per full season cycle (0 = seasons off)
+    pub season_amp: f32,    // yield swing amplitude (0..1); 0 = no seasonal variation
     pub soil_depletion_rate: f32, // how fast harvesting exhausts a tile (0 = off)
-    pub disaster_rate: f32,       // chance/intensity of regional blights (0 = off)
+    pub disaster_rate: f32, // chance/intensity of regional blights (0 = off)
     // population growth
     pub birth_chance: f32,    // chance per pair of NPCs per reproduction check
     pub birth_interval: i32,  // ticks between reproduction checks
@@ -659,7 +659,12 @@ impl World {
         for _ in 0..trees {
             let (x, y) = self.random_fertile_land_cell();
             let last = -self.rng.below(self.params.tree_interval.max(1));
-            self.trees.push(Tree { x, y, last_spawn: last, destroyed: false });
+            self.trees.push(Tree {
+                x,
+                y,
+                last_spawn: last,
+                destroyed: false,
+            });
         }
         for _ in 0..clans {
             // initial clans get diverse random brains — seeding diversity matters
@@ -679,7 +684,12 @@ impl World {
         for _ in 0..trees {
             let (x, y) = self.random_fertile_land_cell();
             let last = -self.rng.below(self.params.tree_interval.max(1));
-            self.trees.push(Tree { x, y, last_spawn: last, destroyed: false });
+            self.trees.push(Tree {
+                x,
+                y,
+                last_spawn: last,
+                destroyed: false,
+            });
         }
         let mut ids = Vec::with_capacity(brains.len());
         for b in brains {
@@ -745,7 +755,8 @@ impl World {
                     continue;
                 }
                 let i = self.grid.idx(xx, yy);
-                if self.grid.owner[i] == NO_OWNER && (founding || self.has_owned_neighbor(id, xx, yy))
+                if self.grid.owner[i] == NO_OWNER
+                    && (founding || self.has_owned_neighbor(id, xx, yy))
                 {
                     self.grid.owner[i] = id;
                     added += 1;
@@ -865,7 +876,10 @@ impl World {
     }
 
     pub fn clan_population(&self, id: i32) -> usize {
-        self.entities.iter().filter(|e| e.clan == id && !e.dead).count()
+        self.entities
+            .iter()
+            .filter(|e| e.clan == id && !e.dead)
+            .count()
     }
 
     /// Population a clan's land can support — keyed to *productive* (fertile)
@@ -1206,9 +1220,9 @@ impl World {
             let pairs = pop / 2;
             let max_births = ((pop + 9) / 10).clamp(1, 4);
             let mut births_this_check = 0;
-            let reserve_pressure =
-                ((self.clans[ci].food - reserve_floor) as f32 / (pop * 8).max(1) as f32)
-                    .clamp(0.0, 1.0);
+            let reserve_pressure = ((self.clans[ci].food - reserve_floor) as f32
+                / (pop * 8).max(1) as f32)
+                .clamp(0.0, 1.0);
             let birth_chance = chance * reserve_pressure;
             let base = match self.clans[ci].stockpile {
                 Some(p) => Some(p),
@@ -1364,7 +1378,9 @@ impl World {
             dx * dx + dy * dy
         });
         for &i in others.iter().take(4) {
-            let d = (self.entities[i].x - lx).abs().max((self.entities[i].y - ly).abs());
+            let d = (self.entities[i].x - lx)
+                .abs()
+                .max((self.entities[i].y - ly).abs());
             if d <= 24 {
                 self.entities[i].clan = id;
                 self.entities[i].last_food = None;
@@ -1406,8 +1422,7 @@ impl World {
             if e.clan >= 0 {
                 if let Some(&idx) = idx_by_id.get(&e.clan) {
                     pop[idx] += 1;
-                    hunger_sum[idx] +=
-                        (e.ticks_since_food as f32 / starve_ticks).clamp(0.0, 2.0);
+                    hunger_sum[idx] += (e.ticks_since_food as f32 / starve_ticks).clamp(0.0, 2.0);
                     if e.is_leader {
                         leader_pos[idx] = Some((e.x, e.y));
                     }
@@ -1555,18 +1570,18 @@ impl World {
                     (size / 25.0).min(1.0),                                  // 0 population
                     (food / (size * 4.0).max(1.0)).min(1.0),                 // 1 stored food / head
                     avg_hunger.min(1.0),                                     // 2 hunger
-                    crowd.min(1.0),                                          // 3 crowding vs land cap
-                    headroom,                                                // 4 room to grow
-                    food_signal,                                             // 5 nearest wild food
-                    (enemies_seen as f32 / (size * 2.0).max(1.0)).min(1.0),  // 6 enemies in sight
+                    crowd.min(1.0), // 3 crowding vs land cap
+                    headroom,       // 4 room to grow
+                    food_signal,    // 5 nearest wild food
+                    (enemies_seen as f32 / (size * 2.0).max(1.0)).min(1.0), // 6 enemies in sight
                     (neutrals_seen as f32 / (size * 2.0).max(1.0)).min(1.0), // 7 recruits in sight
-                    size / (size + max_pop),                                 // 8 relative power
-                    self.clans[idx].aggression,                             // 9 own aggression (feedback)
-                    if grace { 1.0 } else { 0.0 },                          // 10 peace grace active
-                    (terr / 250.0).min(1.0),                                // 11 territory held
-                    if frontier_exists { 1.0 } else { 0.0 },               // 12 can expand?
-                    if enemy_near { 1.0 } else { 0.0 },                     // 13 enemy nearby (threat)
-                    world_food,                                             // 14 food climate (famine sense)
+                    size / (size + max_pop), // 8 relative power
+                    self.clans[idx].aggression, // 9 own aggression (feedback)
+                    if grace { 1.0 } else { 0.0 }, // 10 peace grace active
+                    (terr / 250.0).min(1.0), // 11 territory held
+                    if frontier_exists { 1.0 } else { 0.0 }, // 12 can expand?
+                    if enemy_near { 1.0 } else { 0.0 }, // 13 enemy nearby (threat)
+                    world_food,     // 14 food climate (famine sense)
                     (self.season_factor() - 1.0) / self.params.season_amp.max(0.01), // 15 season phase [-1,1]
                     // --- RESERVED future-feature inputs (read 0.0 until the world
                     //     wires them up; the brain's size never changes) ---
@@ -1683,8 +1698,7 @@ impl World {
                 let ds = ((xx - sx).pow(2) + (yy - sy).pow(2)) as f32;
                 let dl = ((xx - leader.0).pow(2) + (yy - leader.1).pow(2)) as f32;
                 // prefer fertile land, close to home, reachable by the leader
-                let score =
-                    fert * 2.0 - (ds / reach) * 0.9 - (dl / reach) * 0.6;
+                let score = fert * 2.0 - (ds / reach) * 0.9 - (dl / reach) * 0.6;
                 if score > best_score {
                     best_score = score;
                     best = Some((xx, yy));
@@ -1998,9 +2012,7 @@ impl World {
             }
             let id = self.clans[ci].id;
             let near_member = self.entities.iter().any(|e| {
-                e.clan == id
-                    && !e.dead
-                    && (e.x - tx).abs().max((e.y - ty).abs()) <= radius
+                e.clan == id && !e.dead && (e.x - tx).abs().max((e.y - ty).abs()) <= radius
             });
             if near_member {
                 if !self.clan_can_add_member(ci) {
@@ -2197,10 +2209,10 @@ impl World {
                 if let Some((mi, mid)) = successor {
                     self.entities[mi].is_leader = true;
                     self.entities[mi].max_health = self.params.leader_health;
-                    self.entities[mi].health =
-                        self.entities[mi].health.max(self.params.leader_health * 0.75);
-                    self.entities[mi].ticks_since_food =
-                        self.entities[mi].ticks_since_food.min(0);
+                    self.entities[mi].health = self.entities[mi]
+                        .health
+                        .max(self.params.leader_health * 0.75);
+                    self.entities[mi].ticks_since_food = self.entities[mi].ticks_since_food.min(0);
                     self.clans[ci].leader_id = mid;
                     self.clans[ci].members.retain(|&m| m != mid);
                 } else {

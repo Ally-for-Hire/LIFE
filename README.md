@@ -1,5 +1,7 @@
 # LIFE
 
+Source repository: <https://github.com/Ally-for-Hire/LIFE>
+
 A native, watchable **civilization / life simulator** written in Rust (egui).
 Clans led by **evolving neural networks** gather, grow, claim territory, defend
 their borders, and wage war on a procedurally generated, terrain-rich grid — all
@@ -45,6 +47,10 @@ cargo run --release        # first release build takes a few minutes, then it's 
   core** (rayon) on a background thread, *and* **in-vivo evolution** in the live
   world (new villages inherit from thriving ones) — with the trainer's champion
   flowing into the world automatically.
+- **Survival-gated quality diversity:** extinction cannot be traded for a flashy
+  score. Viable brains are preserved in survivor, builder, cooperator, defender,
+  and raider niches, while fixed-world benchmarks guard clan-vs-neutral fairness,
+  food security, and mixture-of-experts routing health.
 - **Combat**, **food-gated reproduction**, **food memory**, and **one NPC per
   tile**.
 - Game-like **toggleable panels**, an **NPC inspector** (its current "idea"),
@@ -67,7 +73,11 @@ cargo run --release        # first release build takes a few minutes, then it's 
 ```powershell
 cd life-rs
 cargo test --release
+cargo test --release ai_quality_benchmark_is_deterministic -- --nocapture
 ```
+
+`life-rs/champion.bin` is the tracked deployable model. Marathon logs, stage/gen
+snapshots, backup champions, and `target/` are generated locally and git-ignored.
 
 ## Documentation
 

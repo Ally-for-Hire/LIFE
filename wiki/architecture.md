@@ -14,7 +14,8 @@ no JSON snapshot or HTTP layer like the old JS prototype had.
 | `entity.rs` | `Entity` (one NPC) and its `Goal` (the "idea" shown in the inspector). |
 | `clan.rs` | `Clan`, `ClanMode`, clan stats, and the clan color helper. |
 | `brain.rs` | `Brain`: the hierarchical mixture-of-experts leader policy — a master gate routing over sub-minds (evaluate / mutate / crossover). |
-| `trainer.rs` | `Trainer` + `TrainCfg`: parallel arena evaluation, village-shaped scoring, and evolution. |
+| `quality.rs` | Survival/security metrics, routing-health probes, and the survivor/builder/cooperator/defender/raider niche definitions. |
+| `trainer.rs` | `Trainer` + `TrainCfg`: parallel arena evaluation, fixed behavioral benchmarks, quality-diversity archive, and evolution. |
 | `grid.rs` | `Grid`: the typed-array tile layers and index math. |
 | `rng.rs` | `Rng`: a deterministic, seedable xoshiro256** PRNG. |
 | `diag.rs` | Headless diagnostics (test-only): run scenarios and print village/conflict metrics. |
@@ -44,7 +45,8 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
    first call on the food budget so cultivated land out-produces wilderness.
 2. **update_trees** — wild food drops on *unclaimed* passable cells only (× season).
 3. **clan_think** — every 120 ticks the leader's mixture-of-experts brain picks a
-   mode + aggression from a 17-input situation vector (no strategy gates, just
+   mode + aggression from a fixed 32-input situation vector (live features,
+   reserved future-system slots, and bias; no strategy gates, just
    physical feasibility); every 15 ticks it refreshes cached targets (nearest
    enemy, neutral, trespasser, fertility-scored frontier). Targets are cached on
    the clan so per-entity updates never scan the world.
@@ -65,6 +67,13 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
   population under a brief lock, then evaluates arenas **in parallel across all
   CPU cores via rayon** (unlocked), then applies results. The UI reads progress
   through `Arc<Mutex<Trainer>>`.
+- Survival and food security are hard eligibility gates. Eligible brains update
+  a persistent five-niche quality-diversity archive; those specialists are kept
+  in the breeding pool alongside the strongest generalist. Routing entropy and
+  expert coverage provide a small tie-shaping pressure against expert collapse.
+- The tracked champion is regression-tested on deterministic fixed worlds. The
+  benchmark follows initial clan and neutral cohorts separately so recruitment
+  cannot hide a clan-vs-neutral survival regression.
 - Every `World` owns its own `Rng`; there is **no global RNG**. Same seed →
   identical run (covered by a test).
 

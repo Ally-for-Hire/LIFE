@@ -39,7 +39,13 @@ pub const N_GATE_HID: usize = 10;
 
 /// Output labels for the inspector (the 6 modes + the aggression dial).
 pub const OUT_LABELS: [&str; N_OUT] = [
-    "recruit", "expand", "gather", "attack", "defend", "scout", "aggression",
+    "recruit",
+    "expand",
+    "gather",
+    "attack",
+    "defend",
+    "scout",
+    "aggression",
 ];
 /// Sub-mind labels for the inspector. Purely cosmetic — the experts are free to
 /// specialise however evolution finds best.
@@ -227,6 +233,7 @@ impl Brain {
 
     /// Each sub-mind's raw proposed action vector for the given situation (for
     /// inspecting specialisation — what each expert "wants" before the gate blend).
+    #[cfg(test)]
     pub fn expert_outputs(&self, inputs: &[f32; N_IN]) -> Vec<[f32; N_OUT]> {
         self.experts.iter().map(|sm| sm.forward(inputs)).collect()
     }
@@ -302,14 +309,33 @@ impl Brain {
             *p += 4;
             v
         };
-        let dims = [u32_at(&mut p), u32_at(&mut p), u32_at(&mut p), u32_at(&mut p), u32_at(&mut p)];
-        if dims != [N_IN as u32, N_HID as u32, N_OUT as u32, N_EXPERTS as u32, N_GATE_HID as u32] {
+        let dims = [
+            u32_at(&mut p),
+            u32_at(&mut p),
+            u32_at(&mut p),
+            u32_at(&mut p),
+            u32_at(&mut p),
+        ];
+        if dims
+            != [
+                N_IN as u32,
+                N_HID as u32,
+                N_OUT as u32,
+                N_EXPERTS as u32,
+                N_GATE_HID as u32,
+            ]
+        {
             return Err(bad("brain file dimensions don't match this build"));
         }
         let generation = u32_at(&mut p);
         let mut floats: Vec<f32> = Vec::new();
         while p + 4 <= bytes.len() {
-            floats.push(f32::from_le_bytes([bytes[p], bytes[p + 1], bytes[p + 2], bytes[p + 3]]));
+            floats.push(f32::from_le_bytes([
+                bytes[p],
+                bytes[p + 1],
+                bytes[p + 2],
+                bytes[p + 3],
+            ]));
             p += 4;
         }
         let mut cur = 0usize;

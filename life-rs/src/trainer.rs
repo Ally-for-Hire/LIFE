@@ -8,14 +8,41 @@
 //! GPU. The GPU is already busy rendering the live view.
 
 use crate::brain::Brain;
+use crate::quality::{
+    routing_metrics, score_clan as score_clan_quality, QualityScore, StrategyNiche, FAIRNESS_FLOOR,
+    N_STRATEGY_NICHES, SECURITY_FLOOR, SURVIVAL_FLOOR,
+};
 use crate::rng::Rng;
 use crate::world::{Params, World};
 use rayon::prelude::*;
+use std::collections::HashSet;
+#[cfg(test)]
 use std::time::Instant;
 
 /// Default on-disk location of the evolved champion brain (relative to the run
 /// directory). The app loads this on startup; the marathon trainer writes it.
 pub const CHAMPION_PATH: &str = "champion.bin";
+
+#[derive(Clone)]
+struct QdElite {
+    brain: Brain,
+    quality: QualityScore,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct AiBenchmarkReport {
+    pub worlds: usize,
+    pub mean_fitness: f32,
+    pub robust_survival: f32,
+    pub mean_security: f32,
+    pub clan_cohort_survival: f32,
+    pub neutral_cohort_survival: f32,
+    pub fairness_delta: f32,
+    pub routing_entropy: f32,
+    pub expert_coverage: f32,
+    pub eligible: bool,
+}
 
 #[derive(Clone)]
 pub struct TrainCfg {
@@ -76,6 +103,10 @@ pub struct Trainer {
     pub stagnant_generations: u32,
     pub adaptive_mutation_rate: f32,
     pub adaptive_mutation_strength: f32,
+    pub robust_survival: f32,
+    pub mean_security: f32,
+    pub fairness_margin: f32,
+    pub routing_balance: f32,
     pub history: Vec<[f64; 2]>,     // (generation, best fitness)
     pub avg_history: Vec<[f64; 2]>, // (generation, average fitness)
     pub last_gen_ms: f64,
@@ -90,6 +121,7 @@ pub struct Trainer {
     /// the evolving population must beat diverse strong strategies (not just its
     /// current peers) — the path to robust, real-opponent-level play.
     hof: Vec<Brain>,
+    qd_archive: Vec<Option<QdElite>>,
     rng: Rng,
 }
 
@@ -110,6 +142,10 @@ impl Trainer {
             stagnant_generations: 0,
             adaptive_mutation_rate,
             adaptive_mutation_strength,
+            robust_survival: 0.0,
+            mean_security: 0.0,
+            fairness_margin: 0.0,
+            routing_balance: 0.0,
             history: Vec::new(),
             avg_history: Vec::new(),
             last_gen_ms: 0.0,
@@ -117,12 +153,29 @@ impl Trainer {
             stage_best: f32::MIN,
             stage_stall: 0,
             hof: Vec::new(),
+            qd_archive: vec![None; N_STRATEGY_NICHES],
             rng,
         }
     }
 
     pub fn hof_len(&self) -> usize {
         self.hof.len()
+    }
+
+    pub fn qd_archive_len(&self) -> usize {
+        self.qd_archive.iter().flatten().count()
+    }
+
+    pub fn qd_archive_summary(&self) -> Vec<(&'static str, f32)> {
+        StrategyNiche::ALL
+            .iter()
+            .enumerate()
+            .filter_map(|(i, niche)| {
+                self.qd_archive[i]
+                    .as_ref()
+                    .map(|elite| (niche.label(), elite.quality.niche_quality(*niche)))
+            })
+            .collect()
     }
 
     pub fn snapshot_curriculum(&self) -> (u32, Vec<Brain>) {
@@ -140,8 +193,8 @@ impl Trainer {
     /// hall of fame of champions, and escalate the world-randomisation `stage`
     /// when fitness plateaus — so a stalled run gets harder, more varied worlds
     /// (and a larger map) to master instead of overfitting the current one.
-    pub fn finish_general(&mut self, pop: Vec<Brain>, scores: Vec<f32>, ms: f64) {
-        self.finish_generation(pop, scores, ms);
+    pub fn finish_general(&mut self, pop: Vec<Brain>, scores: Vec<QualityScore>, ms: f64) {
+        self.finish_quality_generation(pop, scores, ms);
         let best = self.best_fitness;
         if self.stage_best == f32::MIN || best > self.stage_best * 1.02 {
             self.stage_best = best.max(self.stage_best);
@@ -190,7 +243,11 @@ impl Trainer {
                 self.population[i] = brain.clone();
             } else if i < keep {
                 let mut c = brain.clone();
-                c.mutate(&mut self.rng, self.cfg.mutation_rate, self.cfg.mutation_strength);
+                c.mutate(
+                    &mut self.rng,
+                    self.cfg.mutation_rate,
+                    self.cfg.mutation_strength,
+                );
                 self.population[i] = c;
             }
         }
@@ -201,6 +258,7 @@ impl Trainer {
 /// to `save_path` periodically (and on exit) and appending a progress line to
 /// `log_path` each generation. If a champion already exists at `save_path`,
 /// training continues from it. Designed for long unattended runs.
+#[cfg(test)]
 pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str) {
     use std::fs::OpenOptions;
     use std::io::Write;
@@ -210,6 +268,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
     // prior run left one, seeding the population from it too.
     let mut champion: Option<Brain> = None;
     let mut champ_score = f32::MIN;
+    let mut champ_quality: Option<QualityScore> = None;
     if let Ok(prev) = Brain::load(save_path) {
         tr.seed_from(prev.clone());
         champion = Some(prev);
@@ -248,7 +307,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
         let hof = tr.hof.clone();
         let t0 = Instant::now();
         // domain-randomised, self-play evaluation across a distribution of worlds
-        let scores = evaluate_general(
+        let scores = evaluate_general_quality(
             &pop,
             &tr.cfg.arena_params,
             gen,
@@ -285,21 +344,26 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
             let ep = tr.cfg.episode_ticks;
             let champ_now = champion
                 .as_ref()
-                .map(|c| benchmark_brain(c, &base, stage, &hofb, ep, BENCH_WORLDS, BENCH_SEED));
+                .map(|c| benchmark_quality(c, &base, stage, &hofb, ep, BENCH_WORLDS, BENCH_SEED));
             let challenger = tr.best_brain.clone();
             let chal_now = challenger
                 .as_ref()
-                .map(|c| benchmark_brain(c, &base, stage, &hofb, ep, BENCH_WORLDS, BENCH_SEED));
+                .map(|c| benchmark_quality(c, &base, stage, &hofb, ep, BENCH_WORLDS, BENCH_SEED));
             match (chal_now, champ_now) {
-                (Some(hs), Some(cs)) if hs >= cs => {
+                (Some(hq), Some(cq)) if quality_better(&hq, &cq) => {
                     champion = challenger;
-                    champ_score = hs;
+                    champ_score = hq.fitness;
+                    champ_quality = Some(hq);
                 }
-                (Some(hs), None) => {
+                (Some(hq), None) => {
                     champion = challenger;
-                    champ_score = hs;
+                    champ_score = hq.fitness;
+                    champ_quality = Some(hq);
                 }
-                (_, Some(cs)) => champ_score = cs,
+                (_, Some(cq)) => {
+                    champ_score = cq.fitness;
+                    champ_quality = Some(cq);
+                }
                 _ => {}
             }
             if let Some(c) = &champion {
@@ -307,11 +371,18 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                 let _ = c.save(&format!("champion-stage{}.bin", tr.stage));
                 tr.best_brain = Some(c.clone()); // keep the proven champion in the gene pool
             }
+            let cq = champ_quality.unwrap_or_default();
             append(
                 log_path,
                 &format!(
-                    "    [benchmark] champion {:.0} on {} fixed worlds (stage {})\n",
-                    champ_score, BENCH_WORLDS, tr.stage
+                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
+                    champ_score,
+                    cq.robust_survival,
+                    cq.security,
+                    cq.routing_entropy,
+                    cq.expert_coverage,
+                    BENCH_WORLDS,
+                    tr.stage
                 ),
             );
         }
@@ -319,11 +390,15 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
         append(
             log_path,
             &format!(
-                "gen {:>4}  stage {}  best {:>7.0}  avg {:>7.0}  champ {:>7.0}  hof {:>2}  gen_time {:>5.1}s  elapsed {:>5.1}m\n",
+                "gen {:>4}  stage {}  best {:>7.0}  avg {:>7.0}  survival {:.2}  fairness {:+.2}  niches {}/{}  champ {:>7.0}  hof {:>2}  gen_time {:>5.1}s  elapsed {:>5.1}m\n",
                 tr.generation,
                 tr.stage,
                 tr.best_fitness,
                 tr.avg_fitness,
+                tr.robust_survival,
+                tr.fairness_margin,
+                tr.qd_archive_len(),
+                N_STRATEGY_NICHES,
                 champ_score,
                 tr.hof_len(),
                 ms / 1000.0,
@@ -347,6 +422,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
 
 impl Trainer {
     /// Apply one finished generation's scores, record stats, and breed the next.
+    #[cfg(test)]
     pub fn finish_generation(&mut self, pop: Vec<Brain>, scores: Vec<f32>, ms: f64) {
         let mut ranked: Vec<(Brain, f32)> = pop.into_iter().zip(scores).collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -384,6 +460,192 @@ impl Trainer {
         self.evolve(ranked);
     }
 
+    /// Apply survival-gated multi-metric results, update the persistent niche
+    /// archive, then breed from both strong generalists and distinct specialists.
+    fn finish_quality_generation(&mut self, pop: Vec<Brain>, scores: Vec<QualityScore>, ms: f64) {
+        let mut ranked: Vec<(Brain, QualityScore)> = pop.into_iter().zip(scores).collect();
+        ranked.sort_by(|a, b| {
+            b.1.selection_score()
+                .partial_cmp(&a.1.selection_score())
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        self.update_qd_archive(&ranked);
+        let best_idx = ranked
+            .iter()
+            .enumerate()
+            .filter(|(_, candidate)| candidate.1.eligible)
+            .max_by(|(_, a), (_, b)| {
+                a.1.fitness
+                    .partial_cmp(&b.1.fitness)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let best_quality = ranked.get(best_idx).map(|r| r.1).unwrap_or_default();
+        let avg = if ranked.is_empty() {
+            0.0
+        } else {
+            ranked.iter().map(|r| r.1.fitness).sum::<f32>() / ranked.len() as f32
+        };
+
+        self.best_fitness = best_quality.fitness;
+        self.avg_fitness = avg;
+        self.best_brain = ranked.get(best_idx).map(|r| r.0.clone());
+        self.robust_survival = best_quality.robust_survival;
+        self.mean_security = best_quality.security;
+        self.fairness_margin = best_quality.robust_fairness;
+        self.routing_balance = best_quality.routing_entropy * best_quality.expert_coverage;
+        let improvement_margin = self.best_ever.abs().max(1.0) * 0.002;
+        if self.best_fitness > self.best_ever + improvement_margin {
+            self.best_ever = self.best_fitness;
+            self.stagnant_generations = 0;
+        } else {
+            self.stagnant_generations = self.stagnant_generations.saturating_add(1);
+        }
+        let g = self.generation as f64;
+        self.history.push([g, self.best_fitness as f64]);
+        self.avg_history.push([g, avg as f64]);
+        if self.history.len() > 2000 {
+            self.history.remove(0);
+            self.avg_history.remove(0);
+        }
+        self.last_gen_ms = ms;
+        self.generation += 1;
+        self.evolve_quality(ranked);
+    }
+
+    fn update_qd_archive(&mut self, ranked: &[(Brain, QualityScore)]) {
+        let mut used = HashSet::new();
+        for niche in StrategyNiche::ALL {
+            let candidate = ranked
+                .iter()
+                .enumerate()
+                .filter(|(i, (_, q))| !used.contains(i) && q.qualifies_for(niche))
+                .max_by(|(_, a), (_, b)| {
+                    let aq = a.1.niche_quality(niche);
+                    let bq = b.1.niche_quality(niche);
+                    aq.partial_cmp(&bq)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| {
+                            a.1.fitness
+                                .partial_cmp(&b.1.fitness)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                });
+            let Some((candidate_idx, (brain, quality))) = candidate else {
+                continue;
+            };
+            used.insert(candidate_idx);
+            let slot = &mut self.qd_archive[niche.index()];
+            let replace = slot.as_ref().is_none_or(|old| {
+                let new_niche = quality.niche_quality(niche);
+                let old_niche = old.quality.niche_quality(niche);
+                new_niche > old_niche + 0.002
+                    || ((new_niche - old_niche).abs() <= 0.002
+                        && quality.fitness > old.quality.fitness)
+            });
+            if replace {
+                *slot = Some(QdElite {
+                    brain: brain.clone(),
+                    quality: *quality,
+                });
+            }
+        }
+    }
+
+    fn evolve_quality(&mut self, ranked: Vec<(Brain, QualityScore)>) {
+        let pop_size = self.cfg.pop_size;
+        if pop_size == 0 || ranked.is_empty() {
+            self.population.clear();
+            return;
+        }
+        let mut next = Vec::with_capacity(pop_size);
+        let stagnation = self.stagnant_generations as f32;
+        self.adaptive_mutation_rate =
+            (self.cfg.mutation_rate * (1.0 + stagnation * 0.08)).clamp(0.02, 0.85);
+        self.adaptive_mutation_strength =
+            (self.cfg.mutation_strength * (1.0 + stagnation * 0.10)).clamp(0.02, 2.0);
+        let immigrant_fraction = if self.stagnant_generations >= 24 {
+            0.30
+        } else if self.stagnant_generations >= 12 {
+            0.18
+        } else if self.stagnant_generations >= 6 {
+            0.08
+        } else {
+            0.0
+        };
+        let immigrants = ((pop_size as f32) * immigrant_fraction).round() as usize;
+        let breeding_limit = pop_size.saturating_sub(immigrants);
+
+        if let Some(best) = &self.best_brain {
+            next.push(best.clone());
+        }
+        for elite in self.qd_archive.iter().flatten() {
+            if next.len() >= breeding_limit {
+                break;
+            }
+            next.push(elite.brain.clone());
+        }
+        for candidate in ranked.iter().take(self.cfg.elite.min(ranked.len())) {
+            if next.len() >= breeding_limit {
+                break;
+            }
+            next.push(candidate.0.clone());
+        }
+        if self.stagnant_generations >= 4 {
+            for elite in self.qd_archive.iter().flatten() {
+                if next.len() >= breeding_limit {
+                    break;
+                }
+                let mut child = elite.brain.clone();
+                child.mutate(
+                    &mut self.rng,
+                    self.adaptive_mutation_rate,
+                    self.adaptive_mutation_strength * 1.35,
+                );
+                next.push(child);
+            }
+        }
+        while next.len() < breeding_limit {
+            let a = self.tournament_quality(&ranked).clone();
+            let b = self.tournament_quality(&ranked).clone();
+            let mut child = Brain::crossover(&a, &b, &mut self.rng);
+            child.mutate(
+                &mut self.rng,
+                self.adaptive_mutation_rate,
+                self.adaptive_mutation_strength,
+            );
+            next.push(child);
+        }
+        while next.len() < pop_size {
+            let mut brain = Brain::random(&mut self.rng);
+            brain.mutate(
+                &mut self.rng,
+                self.adaptive_mutation_rate,
+                self.adaptive_mutation_strength,
+            );
+            next.push(brain);
+        }
+        self.population = next;
+    }
+
+    fn tournament_quality<'a>(&mut self, ranked: &'a [(Brain, QualityScore)]) -> &'a Brain {
+        let k = 3.min(ranked.len()).max(1);
+        let mut best = 0usize;
+        let mut best_score = f32::MIN;
+        for _ in 0..k {
+            let i = self.rng.below(ranked.len() as i32) as usize;
+            let score = ranked[i].1.selection_score();
+            if score > best_score {
+                best_score = score;
+                best = i;
+            }
+        }
+        &ranked[best].0
+    }
+
+    #[cfg(test)]
     fn evolve(&mut self, ranked: Vec<(Brain, f32)>) {
         let pop_size = self.cfg.pop_size;
         let elite = self.cfg.elite.min(ranked.len());
@@ -451,6 +713,7 @@ impl Trainer {
         self.population = next;
     }
 
+    #[cfg(test)]
     fn tournament<'a>(&mut self, ranked: &'a [(Brain, f32)]) -> &'a Brain {
         let k = 3.min(ranked.len()).max(1);
         let mut best = 0usize;
@@ -487,6 +750,7 @@ pub fn arena_count(pop_len: usize, cfg: &TrainCfg) -> usize {
 
 /// Evaluate the whole population in parallel arenas; returns mean fitness per
 /// brain index. Uses rayon's global pool, so it spans all CPU cores.
+#[cfg(test)]
 pub fn evaluate_parallel(pop: &[Brain], cfg: &TrainCfg, gen: u32) -> Vec<f32> {
     let n = pop.len();
     if n == 0 {
@@ -530,10 +794,17 @@ pub fn evaluate_parallel(pop: &[Brain], cfg: &TrainCfg, gen: u32) -> Vec<f32> {
         }
     }
     (0..n)
-        .map(|i| if cnt[i] > 0 { sum[i] / cnt[i] as f32 } else { 0.0 })
+        .map(|i| {
+            if cnt[i] > 0 {
+                sum[i] / cnt[i] as f32
+            } else {
+                0.0
+            }
+        })
         .collect()
 }
 
+#[cfg(test)]
 fn run_arena(
     pop: &[Brain],
     group: &[usize],
@@ -571,6 +842,71 @@ struct WorldSpec {
     world_size: i32,
     trees: i32,
     neutrals: i32,
+}
+
+#[derive(Clone, Copy)]
+struct QualityTotals {
+    sum: QualityScore,
+    robust_survival: f32,
+    robust_fairness: f32,
+    count: u32,
+}
+
+impl Default for QualityTotals {
+    fn default() -> Self {
+        QualityTotals {
+            sum: QualityScore::default(),
+            robust_survival: 1.0,
+            robust_fairness: 1.0,
+            count: 0,
+        }
+    }
+}
+
+impl QualityTotals {
+    fn add(&mut self, score: QualityScore) {
+        self.sum.fitness += score.fitness;
+        self.sum.survival += score.survival;
+        self.sum.security += score.security;
+        self.sum.fairness += score.fairness;
+        self.sum.settlement += score.settlement;
+        self.sum.expansion += score.expansion;
+        self.sum.cooperation += score.cooperation;
+        self.sum.defense += score.defense;
+        self.sum.combat += score.combat;
+        self.robust_survival = self.robust_survival.min(score.survival);
+        self.robust_fairness = self.robust_fairness.min(score.fairness);
+        self.count += 1;
+    }
+
+    fn finish(self, brain: &Brain) -> QualityScore {
+        if self.count == 0 {
+            return QualityScore::default();
+        }
+        let inv = 1.0 / self.count as f32;
+        let (routing_entropy, expert_coverage) = routing_metrics(brain);
+        let survival = self.sum.survival * inv;
+        let security = self.sum.security * inv;
+        let fairness = self.sum.fairness * inv;
+        QualityScore {
+            fitness: self.sum.fitness * inv,
+            survival,
+            robust_survival: self.robust_survival,
+            security,
+            fairness,
+            robust_fairness: self.robust_fairness,
+            settlement: self.sum.settlement * inv,
+            expansion: self.sum.expansion * inv,
+            cooperation: self.sum.cooperation * inv,
+            defense: self.sum.defense * inv,
+            combat: self.sum.combat * inv,
+            routing_entropy,
+            expert_coverage,
+            eligible: self.robust_survival >= SURVIVAL_FLOOR
+                && security >= SECURITY_FLOOR
+                && self.robust_fairness >= FAIRNESS_FLOOR,
+        }
+    }
 }
 
 /// Draw a random world whose difficulty/variety scales with `stage`. The map
@@ -612,7 +948,11 @@ fn random_world_spec(base: &Params, rng: &mut Rng, stage: u32) -> WorldSpec {
     // as exhaustion bites at higher stages.
     p.soil_depletion_rate = if d > 0.25 { r(rng, 0.0, 0.8 * d) } else { 0.0 };
     // Regional disasters: only the hardest worlds, ramping with difficulty.
-    p.disaster_rate = if d > 0.5 { r(rng, 0.0, 1.4 * (d - 0.5)) } else { 0.0 };
+    p.disaster_rate = if d > 0.5 {
+        r(rng, 0.0, 1.4 * (d - 0.5))
+    } else {
+        0.0
+    };
     // Terrain shape.
     p.water_level = r(rng, 0.22, 0.42);
     p.mountain_level = r(rng, 0.72, 0.88);
@@ -635,18 +975,51 @@ fn run_arena_general(
     spec: &WorldSpec,
     episode: i32,
     seed: u64,
-) -> Vec<f32> {
+) -> Vec<QualityScore> {
     let mut w = World::new(spec.world_size, seed);
     w.params = spec.params.clone();
     let mut brains: Vec<Brain> = scored.to_vec();
     brains.extend_from_slice(opp);
     let ids = w.setup_arena(&brains, spec.trees, spec.neutrals);
+    let clan_cohorts: Vec<HashSet<u32>> = ids
+        .iter()
+        .take(scored.len())
+        .map(|cid| {
+            w.entities
+                .iter()
+                .filter(|entity| entity.clan == *cid)
+                .map(|entity| entity.id)
+                .collect()
+        })
+        .collect();
+    let neutral_cohort: HashSet<u32> = w
+        .entities
+        .iter()
+        .filter(|entity| entity.clan < 0)
+        .map(|entity| entity.id)
+        .collect();
     for _ in 0..episode {
         w.step();
     }
+    let alive: HashSet<u32> = w.entities.iter().map(|entity| entity.id).collect();
+    let cohort_ratio = |cohort: &HashSet<u32>| {
+        if cohort.is_empty() {
+            1.0
+        } else {
+            cohort.iter().filter(|id| alive.contains(id)).count() as f32 / cohort.len() as f32
+        }
+    };
+    let neutral_survival = cohort_ratio(&neutral_cohort);
     ids.iter()
         .take(scored.len())
-        .map(|&cid| score_clan(&w, cid))
+        .zip(clan_cohorts)
+        .map(|(&cid, cohort)| {
+            let mut quality = score_clan_quality(&w, cid);
+            quality.fairness = cohort_ratio(&cohort) - neutral_survival;
+            quality.robust_fairness = quality.fairness;
+            quality.eligible &= quality.fairness >= FAIRNESS_FLOOR;
+            quality
+        })
         .collect()
 }
 
@@ -657,7 +1030,7 @@ fn run_arena_general(
 /// while the worlds still rotate across generations and span stages `0..=stage`
 /// (so brains must generalise, not overfit one map). A brain's fitness is its
 /// mean over the shared worlds. Spans all cores via rayon.
-pub fn evaluate_general(
+pub fn evaluate_general_quality(
     pop: &[Brain],
     base: &Params,
     gen: u32,
@@ -666,7 +1039,7 @@ pub fn evaluate_general(
     seed: u64,
     episode: i32,
     clans_per_arena: usize,
-) -> Vec<f32> {
+) -> Vec<QualityScore> {
     let n = pop.len();
     if n == 0 {
         return vec![];
@@ -717,7 +1090,7 @@ pub fn evaluate_general(
         }
     }
 
-    let results: Vec<Vec<(usize, f32)>> = tasks
+    let results: Vec<Vec<(usize, QualityScore)>> = tasks
         .par_iter()
         .enumerate()
         .map(|(ti, (wi, g))| {
@@ -731,17 +1104,13 @@ pub fn evaluate_general(
         })
         .collect();
 
-    let mut sum = vec![0f32; n];
-    let mut cnt = vec![0u32; n];
+    let mut totals = vec![QualityTotals::default(); n];
     for r in results {
         for (bi, s) in r {
-            sum[bi] += s;
-            cnt[bi] += 1;
+            totals[bi].add(s);
         }
     }
-    (0..n)
-        .map(|i| if cnt[i] > 0 { sum[i] / cnt[i] as f32 } else { 0.0 })
-        .collect()
+    (0..n).map(|i| totals[i].finish(&pop[i])).collect()
 }
 
 /// Score one brain across a **fixed** benchmark of randomised worlds (constant
@@ -749,7 +1118,8 @@ pub fn evaluate_general(
 /// worlds are fixed, two brains benchmarked with the same args are directly
 /// comparable — this is how a *monotonic* champion is chosen, immune to the
 /// per-generation luck that froze the old champion. Parallel across worlds.
-pub fn benchmark_brain(
+#[cfg(test)]
+pub fn benchmark_quality(
     brain: &Brain,
     base: &Params,
     stage: u32,
@@ -757,25 +1127,130 @@ pub fn benchmark_brain(
     episode: i32,
     n_worlds: usize,
     seed: u64,
-) -> f32 {
+) -> QualityScore {
     if n_worlds == 0 {
-        return 0.0;
+        return QualityScore::default();
     }
-    let scores: Vec<f32> = (0..n_worlds)
+    let scores: Vec<QualityScore> = (0..n_worlds)
         .into_par_iter()
         .map(|wi| {
             let mut wr = Rng::new(seed ^ (wi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
             let eff_stage = (wi as u32) % (stage + 1);
             let spec = random_world_spec(base, &mut wr, eff_stage);
             let aseed = seed.wrapping_add((wi as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
-            run_arena_general(std::slice::from_ref(brain), opponents, &spec, episode, aseed)[0]
+            run_arena_general(
+                std::slice::from_ref(brain),
+                opponents,
+                &spec,
+                episode,
+                aseed,
+            )[0]
         })
         .collect();
-    scores.iter().sum::<f32>() / scores.len() as f32
+    let mut totals = QualityTotals::default();
+    for score in scores {
+        totals.add(score);
+    }
+    totals.finish(brain)
+}
+
+/// Deterministic behavioral contract across fixed worlds. Initial clan members
+/// and neutrals are tracked as cohorts, so recruitment cannot disguise whether
+/// group membership was actually safer than starting unaffiliated.
+#[cfg(test)]
+pub fn benchmark_ai_quality(
+    brain: &Brain,
+    base: &Params,
+    stage: u32,
+    episode: i32,
+    n_worlds: usize,
+    seed: u64,
+) -> AiBenchmarkReport {
+    if n_worlds == 0 {
+        return AiBenchmarkReport::default();
+    }
+    let results: Vec<(QualityScore, f32, f32)> = (0..n_worlds)
+        .into_par_iter()
+        .map(|wi| {
+            let mut wr = Rng::new(seed ^ (wi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let eff_stage = (wi as u32) % (stage + 1);
+            let spec = random_world_spec(base, &mut wr, eff_stage);
+            let aseed = seed.wrapping_add((wi as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+            let mut world = World::new(spec.world_size, aseed);
+            world.params = spec.params;
+            let ids = world.setup_arena(std::slice::from_ref(brain), spec.trees, spec.neutrals);
+            let cid = ids[0];
+            let clan_cohort: HashSet<u32> = world
+                .entities
+                .iter()
+                .filter(|entity| entity.clan == cid)
+                .map(|entity| entity.id)
+                .collect();
+            let neutral_cohort: HashSet<u32> = world
+                .entities
+                .iter()
+                .filter(|entity| entity.clan < 0)
+                .map(|entity| entity.id)
+                .collect();
+            for _ in 0..episode {
+                world.step();
+            }
+            let alive: HashSet<u32> = world.entities.iter().map(|entity| entity.id).collect();
+            let cohort_ratio = |cohort: &HashSet<u32>| {
+                if cohort.is_empty() {
+                    1.0
+                } else {
+                    cohort.iter().filter(|id| alive.contains(id)).count() as f32
+                        / cohort.len() as f32
+                }
+            };
+            (
+                score_clan_quality(&world, cid),
+                cohort_ratio(&clan_cohort),
+                cohort_ratio(&neutral_cohort),
+            )
+        })
+        .collect();
+
+    let mut totals = QualityTotals::default();
+    let mut clan_survival = 0.0;
+    let mut neutral_survival = 0.0;
+    for (quality, clan, neutral) in results {
+        totals.add(quality);
+        clan_survival += clan;
+        neutral_survival += neutral;
+    }
+    let quality = totals.finish(brain);
+    let inv = 1.0 / n_worlds as f32;
+    let clan_cohort_survival = clan_survival * inv;
+    let neutral_cohort_survival = neutral_survival * inv;
+    let fairness_delta = clan_cohort_survival - neutral_cohort_survival;
+    AiBenchmarkReport {
+        worlds: n_worlds,
+        mean_fitness: quality.fitness,
+        robust_survival: quality.robust_survival,
+        mean_security: quality.security,
+        clan_cohort_survival,
+        neutral_cohort_survival,
+        fairness_delta,
+        routing_entropy: quality.routing_entropy,
+        expert_coverage: quality.expert_coverage,
+        eligible: quality.eligible && fairness_delta >= -0.05,
+    }
+}
+
+#[cfg(test)]
+fn quality_better(challenger: &QualityScore, reigning: &QualityScore) -> bool {
+    match (challenger.eligible, reigning.eligible) {
+        (true, false) => true,
+        (false, true) => false,
+        _ => challenger.selection_score() >= reigning.selection_score(),
+    }
 }
 
 /// Fitness from a clan's final state. Kept as a smooth weighted sum (no hard
 /// cliffs) so the gradient is learnable; a wiped-out clan scores 0.
+#[cfg(test)]
 fn score_clan(w: &World, cid: i32) -> f32 {
     match w.clan_by_id(cid) {
         Some(c) => {
@@ -871,5 +1346,121 @@ mod tests {
         assert!(tr.best_ever.is_finite() && tr.best_ever > 0.0);
         assert!(tr.best_brain.is_some());
         assert_eq!(tr.population.len(), 12);
+    }
+
+    #[test]
+    fn survival_gate_beats_flashy_extinction() {
+        let extinct = QualityScore {
+            fitness: 1_000_000.0,
+            survival: 0.0,
+            robust_survival: 0.0,
+            security: 0.0,
+            ..QualityScore::default()
+        };
+        let viable = QualityScore {
+            fitness: 100.0,
+            survival: 1.0,
+            robust_survival: 1.0,
+            security: 0.8,
+            eligible: true,
+            ..QualityScore::default()
+        };
+        assert!(viable.selection_score() > extinct.selection_score());
+    }
+
+    #[test]
+    fn quality_diversity_archive_keeps_distinct_niches() {
+        let mut cfg = TrainCfg::default();
+        cfg.pop_size = N_STRATEGY_NICHES;
+        cfg.elite = 0;
+        let mut trainer = Trainer::new(cfg);
+        let population = trainer.population.clone();
+        let base = QualityScore {
+            fitness: 100.0,
+            survival: 1.0,
+            robust_survival: 1.0,
+            security: 0.8,
+            settlement: 0.6,
+            expansion: 0.2,
+            defense: 0.7,
+            eligible: true,
+            ..QualityScore::default()
+        };
+        let mut scores = vec![base; N_STRATEGY_NICHES];
+        scores[0].security = 1.0;
+        scores[1].settlement = 1.0;
+        scores[1].expansion = 1.0;
+        scores[2].cooperation = 1.0;
+        scores[3].defense = 1.0;
+        scores[4].combat = 1.0;
+        trainer.finish_general(population, scores, 0.0);
+        assert_eq!(trainer.qd_archive_len(), N_STRATEGY_NICHES);
+        assert_eq!(trainer.population.len(), N_STRATEGY_NICHES);
+    }
+
+    #[test]
+    fn ai_quality_benchmark_is_deterministic() {
+        let brain = Brain::load(CHAMPION_PATH).expect("tracked champion.bin should load");
+        let base = Params::default();
+        let a = benchmark_ai_quality(&brain, &base, MAX_STAGE, 4000, 13, 0x51FE_BEEF);
+        let b = benchmark_ai_quality(&brain, &base, MAX_STAGE, 4000, 13, 0x51FE_BEEF);
+        println!("AI quality benchmark: {a:#?}");
+        assert_eq!(a.worlds, 13);
+        assert!((a.mean_fitness - b.mean_fitness).abs() < 1e-5);
+        assert!((a.fairness_delta - b.fairness_delta).abs() < 1e-6);
+        assert!((0.0..=1.0).contains(&a.routing_entropy));
+        assert!((0.0..=1.0).contains(&a.expert_coverage));
+        assert!(
+            a.eligible,
+            "tracked champion must remain survival-qualified"
+        );
+        assert!(
+            a.robust_survival >= 0.95,
+            "robust survival regressed: {a:#?}"
+        );
+        assert!(a.mean_security >= 0.80, "food security regressed: {a:#?}");
+        assert!(
+            a.clan_cohort_survival >= a.neutral_cohort_survival,
+            "clan membership became worse than neutrality: {a:#?}"
+        );
+        assert!(
+            a.expert_coverage >= 0.50,
+            "expert collapse regressed: {a:#?}"
+        );
+        assert!(
+            a.routing_entropy >= 0.10,
+            "routing collapse regressed: {a:#?}"
+        );
+    }
+
+    #[test]
+    fn quality_training_runs_several_generations() {
+        let mut cfg = TrainCfg::default();
+        cfg.pop_size = 10;
+        cfg.episode_ticks = 1200;
+        cfg.clans_per_arena = 5;
+        let mut trainer = Trainer::new(cfg);
+        for _ in 0..3 {
+            let population = trainer.population.clone();
+            let generation = trainer.generation;
+            let scores = evaluate_general_quality(
+                &population,
+                &trainer.cfg.arena_params,
+                generation,
+                trainer.stage,
+                &[],
+                trainer.cfg.seed,
+                trainer.cfg.episode_ticks,
+                trainer.cfg.clans_per_arena,
+            );
+            trainer.finish_general(population, scores, 0.0);
+        }
+        assert_eq!(trainer.generation, 3);
+        assert_eq!(trainer.population.len(), 10);
+        assert!(trainer.best_fitness.is_finite());
+        assert!(
+            trainer.qd_archive_len() > 0,
+            "quality training should preserve at least one survival-qualified niche"
+        );
     }
 }

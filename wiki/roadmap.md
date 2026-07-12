@@ -29,11 +29,17 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
 - **Evolution, two ways** — an offline arena trainer (parallel rayon, village-
   shaped fitness) *and* in-vivo evolution in the live world, with automatic
   champion transfer from trainer to world.
+- **Generalized robust training** — common-random-number world evaluation,
+  domain randomization, stage curriculum, hall-of-fame self-play, and fixed
+  king-of-the-hill champion benchmarks.
+- **Environmental pressure** — soil depletion and deterministic regional
+  disasters enter progressively at higher curriculum stages.
+- **Survival-gated quality diversity** — deterministic clan-vs-neutral and
+  routing-health benchmarks plus persistent survivor, builder, cooperator,
+  defender, and raider elites.
 
 ## Next (civ layers)
 
-- **Soil depletion / patch rotation** — harvesting briefly lowers a tile's yield,
-  forcing clans to spread across their claim and onto the frontier.
 - **Roads** — buildable road tiles that lower movement cost (hook already wired)
   and later carry trade/logistics.
 - **Buildings + tech tree** — houses, granaries, walls, barracks, markets with
@@ -42,15 +48,16 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
   resource so holding *connected, varied* land matters; relationship memory.
 - **Weapons / military** — equipment from resources + tech that boosts
   attack/defense; brains learn to arm before war.
-- **Save / load** — persist a world and champion brains (a `(seed, params)` pair
-  already reproduces a run).
+- **Save / load** — persist a full world. Champion brain persistence already
+  exists; a `(seed, params)` pair also reproduces a run.
 
 ## Engineering notes
 
 - **Spatial index** — combat and target search currently rebuild a per-tick
   occupancy hashmap and do bounded scans. If populations grow large, switch to a
   cell-bucketed spatial hash for neighbor queries.
-- **Save / load** — persist a world and champion brains to disk (a `(seed,
-  params)` pair already reproduces a run; explicit serialization is the next step).
-- **Fitness** — the training score is a smooth weighted sum; consider fixed
-  benchmark opponents so scores are comparable across generations.
+- **Save / load** — persist complete world state to disk; champion brains are
+  already serialized and the tracked `champion.bin` is regression-tested.
+- **Quality diversity** — the five-niche archive is intentionally compact. Add
+  richer behavior descriptors only when new economy/diplomacy mechanics create
+  genuinely distinct strategic axes.

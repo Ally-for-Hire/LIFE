@@ -212,11 +212,30 @@ To get a more militaristic champion, raise the combat/conquest weight in
 `score_clan` and/or add a "take enemy land" fitness term, then re-run the marathon
 (it will resume from the current champion).
 
+### A14 — Survival-gated quality diversity and behavioral contract
+
+The source is now preserved at `github.com/Ally-for-Hire/LIFE`; `champion.bin` is
+the tracked deployable model, while build output and marathon snapshots/logs are
+ignored. Training no longer treats survival as one tradeable fitness term:
+
+- brains must clear robust-survival and food-security floors before entering the
+  elite pool;
+- eligible specialists are retained in survivor, builder, cooperator, defender,
+  and raider archive slots and reintroduced into breeding;
+- fixed deterministic worlds track original clan and neutral cohorts separately,
+  plus settlement, security, expert coverage, and routing entropy;
+- the training UI and marathon log surface survival, routing balance, and archive
+  coverage.
+
+The pre-existing tracked champion passes the initial 13-world, all-stage contract
+at 4,000 ticks: robust survival **1.00**, clan and neutral cohort survival
+**1.00 / 1.00**, food security **0.88**, routing entropy **0.18**, and expert
+coverage **0.75**.
+The thresholds intentionally freeze today's survival floor while future training
+has room to improve specialization.
+
 ## Open ideas / next
 
-- **Soil depletion / patch rotation:** harvesting a farm tile temporarily lowers
-  its yield, recovering over time — forces spreading across the whole claim and
-  onto the frontier (organic expansion + migration).
 - **Diplomacy / trade:** friendly clans exchange food; relationship memory; a
   second resource (wood/stone) to make holding *connected, varied* land valuable.
 - **More sub-minds / deeper hierarchy:** specialist nets for diplomacy, logistics;

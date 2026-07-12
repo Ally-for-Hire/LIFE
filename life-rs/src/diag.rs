@@ -192,7 +192,12 @@ fn report(label: &str, mut w: World, ticks: i32, every: i32) {
 
 #[test]
 fn diag_gentle() {
-    report("GENTLE 40k", gentle_world(0x1234_5678_9abc_def0), 40_000, 2000);
+    report(
+        "GENTLE 40k",
+        gentle_world(0x1234_5678_9abc_def0),
+        40_000,
+        2000,
+    );
 }
 
 /// Train brains in the arena for a few generations, then drop the champion into
@@ -201,7 +206,7 @@ fn diag_gentle() {
 /// the random-brain baseline above.
 #[test]
 fn diag_trained() {
-    use crate::trainer::{evaluate_parallel, Trainer, TrainCfg};
+    use crate::trainer::{evaluate_parallel, TrainCfg, Trainer};
     let mut cfg = TrainCfg::default();
     cfg.pop_size = 36;
     cfg.episode_ticks = 4000;
@@ -249,8 +254,12 @@ fn train_marathon() {
         .unwrap_or(8.0);
     // Use every logical core for the arenas (the test harness doesn't call the
     // app's rayon setup, so configure the global pool explicitly here).
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(8);
-    let _ = rayon::ThreadPoolBuilder::new().num_threads(cores).build_global();
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(8);
+    let _ = rayon::ThreadPoolBuilder::new()
+        .num_threads(cores)
+        .build_global();
     println!("marathon: using {cores} rayon threads");
     // Tuned for quality over an 8h unattended run: a large diverse population,
     // multi-season episodes so fitness rewards villages that survive winters,
@@ -316,7 +325,11 @@ fn diag_subminds() {
         v[31] = 1.0; // bias
         v
     };
-    let mode_of = |o: &[f32]| (0..6).max_by(|&a, &b| o[a].partial_cmp(&o[b]).unwrap()).unwrap();
+    let mode_of = |o: &[f32]| {
+        (0..6)
+            .max_by(|&a, &b| o[a].partial_cmp(&o[b]).unwrap())
+            .unwrap()
+    };
     let situations: [(&str, fn(&mut [f32; N_IN])); 6] = [
         ("peace/growth ", |v| {
             v[2] = 0.1;
@@ -380,7 +393,11 @@ fn diag_subminds() {
     println!(
         "avg gate usage: {}",
         (0..N_EXPERTS)
-            .map(|i| format!("{}:{:.2}", SUBMIND_LABELS[i], gate_sum[i] / situations.len() as f32))
+            .map(|i| format!(
+                "{}:{:.2}",
+                SUBMIND_LABELS[i],
+                gate_sum[i] / situations.len() as f32
+            ))
             .collect::<Vec<_>>()
             .join("  ")
     );
@@ -399,10 +416,16 @@ fn brain_save_load_roundtrip() {
     let (o1, g1) = b.evaluate(&inputs);
     let (o2, g2) = loaded.evaluate(&inputs);
     for i in 0..crate::brain::N_OUT {
-        assert!((o1[i] - o2[i]).abs() < 1e-6, "output {i} differs after roundtrip");
+        assert!(
+            (o1[i] - o2[i]).abs() < 1e-6,
+            "output {i} differs after roundtrip"
+        );
     }
     for i in 0..crate::brain::N_EXPERTS {
-        assert!((g1[i] - g2[i]).abs() < 1e-6, "gate {i} differs after roundtrip");
+        assert!(
+            (g1[i] - g2[i]).abs() < 1e-6,
+            "gate {i} differs after roundtrip"
+        );
     }
     let _ = std::fs::remove_file(path);
 }

@@ -272,7 +272,8 @@ impl LifeApp {
         self.world.params = p;
         self.world.maintain_pop = if self.maintain_on { self.p_maintain } else { 0 };
         self.world.maintain_clans = self.p_clans; // keep a living patchwork of villages
-        self.world.populate(self.p_entities, self.p_trees, self.p_clans);
+        self.world
+            .populate(self.p_entities, self.p_trees, self.p_clans);
         self.selected = None;
         self.hist.clear();
         self.last_sample_tick = 0;
@@ -287,7 +288,8 @@ impl LifeApp {
         self.world.params = params;
         self.world.maintain_pop = if self.maintain_on { self.p_maintain } else { 0 };
         self.world.maintain_clans = self.p_clans; // keep a living patchwork of villages
-        self.world.populate(self.p_entities, self.p_trees, self.p_clans);
+        self.world
+            .populate(self.p_entities, self.p_trees, self.p_clans);
         self.selected = None;
         self.hist.clear();
         self.last_sample_tick = 0;
@@ -312,7 +314,10 @@ impl LifeApp {
         let mut clan_col: HashMap<i32, egui::Color32> = HashMap::new();
         for c in &self.world.clans {
             if !c.disbanded {
-                clan_col.insert(c.id, egui::Color32::from_rgb(c.color[0], c.color[1], c.color[2]));
+                clan_col.insert(
+                    c.id,
+                    egui::Color32::from_rgb(c.color[0], c.color[1], c.color[2]),
+                );
             }
         }
 
@@ -371,7 +376,10 @@ impl LifeApp {
             px[g.idx(e.x, e.y)] = c;
         }
 
-        egui::ColorImage { size: [w, w], pixels: px }
+        egui::ColorImage {
+            size: [w, w],
+            pixels: px,
+        }
     }
 
     fn update_texture(&mut self, ctx: &egui::Context) {
@@ -568,12 +576,20 @@ impl eframe::App for LifeApp {
                             self.zoom = 1.0;
                             self.pan = egui::Vec2::ZERO;
                         }
-                        ui.label(egui::RichText::new("drag = pan · scroll = zoom").small().weak());
+                        ui.label(
+                            egui::RichText::new("drag = pan · scroll = zoom")
+                                .small()
+                                .weak(),
+                        );
 
                         ui.separator();
                         ui.label(egui::RichText::new("LEGEND").small().weak());
                         legend_row(ui, egui::Color32::from_rgb(255, 238, 150), "leader");
-                        legend_row(ui, egui::Color32::from_rgb(200, 206, 216), "villager (wandering)");
+                        legend_row(
+                            ui,
+                            egui::Color32::from_rgb(200, 206, 216),
+                            "villager (wandering)",
+                        );
                         legend_row(ui, egui::Color32::from_rgb(222, 198, 120), "seeking food");
                         legend_row(ui, egui::Color32::from_rgb(150, 222, 150), "eating");
                         legend_row(ui, egui::Color32::from_rgb(222, 92, 92), "starving");
@@ -642,17 +658,27 @@ impl eframe::App for LifeApp {
                                 ));
                                 ui.add_space(2.0);
                                 ui.label(
-                                    egui::RichText::new("master → sub-mind routing:").small().weak(),
+                                    egui::RichText::new("master → sub-mind routing:")
+                                        .small()
+                                        .weak(),
                                 );
                                 for (i, label) in crate::brain::SUBMIND_LABELS.iter().enumerate() {
                                     let v = c.brain.last_gate[i];
-                                    ui.add(egui::ProgressBar::new(v).text(format!("{label} {v:.2}")));
+                                    ui.add(
+                                        egui::ProgressBar::new(v).text(format!("{label} {v:.2}")),
+                                    );
                                 }
                                 ui.add_space(2.0);
-                                ui.label(egui::RichText::new("blended action utilities:").small().weak());
+                                ui.label(
+                                    egui::RichText::new("blended action utilities:")
+                                        .small()
+                                        .weak(),
+                                );
                                 for (i, label) in crate::brain::OUT_LABELS.iter().enumerate() {
                                     let v = c.brain.last_out[i];
-                                    ui.add(egui::ProgressBar::new(v).text(format!("{label} {v:.2}")));
+                                    ui.add(
+                                        egui::ProgressBar::new(v).text(format!("{label} {v:.2}")),
+                                    );
                                 }
                             }
                         }
@@ -670,7 +696,9 @@ impl eframe::App for LifeApp {
                         .show(ui, |ui| {
                             let mut clans: Vec<&crate::clan::Clan> =
                                 self.world.clans.iter().filter(|c| !c.disbanded).collect();
-                            clans.sort_by_key(|c| std::cmp::Reverse(self.world.clan_population(c.id)));
+                            clans.sort_by_key(|c| {
+                                std::cmp::Reverse(self.world.clan_population(c.id))
+                            });
                             if clans.is_empty() {
                                 ui.label(egui::RichText::new("no clans").weak());
                             }
@@ -716,9 +744,7 @@ impl eframe::App for LifeApp {
                                 p.line(
                                     egui_plot::Line::new(self.hist.leaders.clone()).name("leaders"),
                                 );
-                                p.line(
-                                    egui_plot::Line::new(self.hist.clans.clone()).name("clans"),
-                                );
+                                p.line(egui_plot::Line::new(self.hist.clans.clone()).name("clans"));
                             });
                         egui_plot::Plot::new("food_plot")
                             .height(120.0)
@@ -747,8 +773,7 @@ impl eframe::App for LifeApp {
         // --- center: the world viewport ---
         egui::CentralPanel::default().show(ctx, |ui| {
             let size = ui.available_size();
-            let (rect, response) =
-                ui.allocate_exact_size(size, egui::Sense::click_and_drag());
+            let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click_and_drag());
 
             if response.dragged() {
                 self.pan += response.drag_delta();
@@ -805,7 +830,11 @@ impl eframe::App for LifeApp {
                     let running = self.train_running.load(Ordering::Relaxed);
                     ui.horizontal(|ui| {
                         if ui
-                            .button(if running { "⏸ Stop" } else { "▶ Start training" })
+                            .button(if running {
+                                "⏸ Stop"
+                            } else {
+                                "▶ Start training"
+                            })
                             .clicked()
                         {
                             self.train_running.store(!running, Ordering::Relaxed);
@@ -826,46 +855,87 @@ impl eframe::App for LifeApp {
                         );
                     }
                     ui.separator();
-                    egui::Grid::new("train_stats").num_columns(2).show(ui, |ui| {
-                        ui.label("generation");
-                        ui.label(format!("{}", t.generation));
-                        ui.end_row();
-                        ui.label("best fitness");
-                        ui.label(format!("{:.1}", t.best_fitness));
-                        ui.end_row();
-                        ui.label("avg fitness");
-                        ui.label(format!("{:.1}", t.avg_fitness));
-                        ui.end_row();
-                        ui.label("best ever");
-                        ui.label(format!(
-                            "{:.1}",
-                            if t.best_ever == f32::MIN { 0.0 } else { t.best_ever }
-                        ));
-                        ui.end_row();
-                        ui.label("last gen time");
-                        ui.label(format!("{:.0} ms", t.last_gen_ms));
-                        ui.end_row();
-                        ui.label("stagnation");
-                        ui.label(format!("{} gens", t.stagnant_generations));
-                        ui.end_row();
-                        ui.label("curriculum stage");
-                        ui.label(format!("{} / {}", t.stage, crate::trainer::MAX_STAGE));
-                        ui.end_row();
-                        ui.label("hall of fame");
-                        ui.label(format!("{} champions", t.hof_len()));
-                        ui.end_row();
-                        ui.label("adaptive mutation");
-                        ui.label(format!(
-                            "{:.2} / {:.2}",
-                            t.adaptive_mutation_rate, t.adaptive_mutation_strength
-                        ));
-                        ui.end_row();
-                    });
+                    egui::Grid::new("train_stats")
+                        .num_columns(2)
+                        .show(ui, |ui| {
+                            ui.label("generation");
+                            ui.label(format!("{}", t.generation));
+                            ui.end_row();
+                            ui.label("best fitness");
+                            ui.label(format!("{:.1}", t.best_fitness));
+                            ui.end_row();
+                            ui.label("avg fitness");
+                            ui.label(format!("{:.1}", t.avg_fitness));
+                            ui.end_row();
+                            ui.label("best ever");
+                            ui.label(format!(
+                                "{:.1}",
+                                if t.best_ever == f32::MIN {
+                                    0.0
+                                } else {
+                                    t.best_ever
+                                }
+                            ));
+                            ui.end_row();
+                            ui.label("last gen time");
+                            ui.label(format!("{:.0} ms", t.last_gen_ms));
+                            ui.end_row();
+                            ui.label("stagnation");
+                            ui.label(format!("{} gens", t.stagnant_generations));
+                            ui.end_row();
+                            ui.label("curriculum stage");
+                            ui.label(format!("{} / {}", t.stage, crate::trainer::MAX_STAGE));
+                            ui.end_row();
+                            ui.label("hall of fame");
+                            ui.label(format!("{} champions", t.hof_len()));
+                            ui.end_row();
+                            ui.label("robust survival");
+                            ui.label(format!("{:.0}%", t.robust_survival * 100.0));
+                            ui.end_row();
+                            ui.label("food security");
+                            ui.label(format!("{:.0}%", t.mean_security * 100.0));
+                            ui.end_row();
+                            ui.label("clan fairness floor");
+                            ui.label(format!("{:+.0}%", t.fairness_margin * 100.0));
+                            ui.end_row();
+                            ui.label("routing balance");
+                            ui.label(format!("{:.0}%", t.routing_balance * 100.0));
+                            ui.end_row();
+                            ui.label("strategy archive");
+                            ui.label(format!(
+                                "{} / {} niches",
+                                t.qd_archive_len(),
+                                crate::quality::N_STRATEGY_NICHES
+                            ));
+                            ui.end_row();
+                            ui.label("adaptive mutation");
+                            ui.label(format!(
+                                "{:.2} / {:.2}",
+                                t.adaptive_mutation_rate, t.adaptive_mutation_strength
+                            ));
+                            ui.end_row();
+                        });
+                    let niches = t.qd_archive_summary();
+                    if !niches.is_empty() {
+                        ui.label(
+                            egui::RichText::new(
+                                niches
+                                    .iter()
+                                    .map(|(name, quality)| format!("{name} {quality:.2}"))
+                                    .collect::<Vec<_>>()
+                                    .join("  |  "),
+                            )
+                            .small()
+                            .weak(),
+                        );
+                    }
                     ui.separator();
                     egui::CollapsingHeader::new("Config")
                         .default_open(false)
                         .show(ui, |ui| {
-                            ui.add(egui::Slider::new(&mut t.cfg.pop_size, 8..=512).text("population"));
+                            ui.add(
+                                egui::Slider::new(&mut t.cfg.pop_size, 8..=512).text("population"),
+                            );
                             ui.add(
                                 egui::Slider::new(&mut t.cfg.episode_ticks, 500..=20000)
                                     .text("episode ticks"),
@@ -874,7 +944,9 @@ impl eframe::App for LifeApp {
                                 egui::Slider::new(&mut t.cfg.clans_per_arena, 2..=16)
                                     .text("clans / arena"),
                             );
-                            ui.add(egui::Slider::new(&mut t.cfg.repeats, 1..=64).text("min repeats"));
+                            ui.add(
+                                egui::Slider::new(&mut t.cfg.repeats, 1..=64).text("min repeats"),
+                            );
                             ui.label(
                                 egui::RichText::new(format!(
                                     "{} effective arenas/gen",
@@ -884,10 +956,12 @@ impl eframe::App for LifeApp {
                                 .weak(),
                             );
                             ui.add(
-                                egui::Slider::new(&mut t.cfg.world_size, 64..=256).text("arena size"),
+                                egui::Slider::new(&mut t.cfg.world_size, 64..=256)
+                                    .text("arena size"),
                             );
                             ui.add(
-                                egui::Slider::new(&mut t.cfg.arena_trees, 0..=400).text("arena trees"),
+                                egui::Slider::new(&mut t.cfg.arena_trees, 0..=400)
+                                    .text("arena trees"),
                             );
                             ui.add(
                                 egui::Slider::new(&mut t.cfg.arena_neutrals, 0..=400)
@@ -929,7 +1003,11 @@ impl eframe::App for LifeApp {
                     });
 
                     ui.add_space(4.0);
-                    ui.label(egui::RichText::new("fitness over generations").small().weak());
+                    ui.label(
+                        egui::RichText::new("fitness over generations")
+                            .small()
+                            .weak(),
+                    );
                     let best = t.history.clone();
                     let avg = t.avg_history.clone();
                     egui_plot::Plot::new("fitness_plot")
@@ -966,12 +1044,18 @@ fn spawn_training_thread(
         let (pop, cfg, gen, stage, hof) = {
             let t = trainer.lock().unwrap();
             let (stage, hof) = t.snapshot_curriculum();
-            (t.population.clone(), t.cfg.clone(), t.generation, stage, hof)
+            (
+                t.population.clone(),
+                t.cfg.clone(),
+                t.generation,
+                stage,
+                hof,
+            )
         };
         let start = std::time::Instant::now();
         // domain-randomised, self-play evaluation so the GUI trainer also breeds
         // generally-strong leaders rather than overfitting one world.
-        let scores = crate::trainer::evaluate_general(
+        let scores = crate::trainer::evaluate_general_quality(
             &pop,
             &cfg.arena_params,
             gen,
@@ -1014,7 +1098,9 @@ fn params_ui(ui: &mut egui::Ui, p: &mut Params, tps: f32) {
             ui.add(egui::Slider::new(&mut p.tree_per_cycle, 0..=40).text("pellets / drop"));
             ui.add(egui::Slider::new(&mut p.tree_radius, 1..=40).text("spread radius"));
             ui.add(egui::Slider::new(&mut p.pellet_energy, 1..=100).text("pellet energy"));
-            ui.add(egui::Slider::new(&mut p.max_pellet_fraction, 0.0..=0.6).text("max food density"));
+            ui.add(
+                egui::Slider::new(&mut p.max_pellet_fraction, 0.0..=0.6).text("max food density"),
+            );
             let per_tree = p.tree_per_cycle as f32 / p.tree_interval.max(1) as f32;
             ui.label(
                 egui::RichText::new(format!(
@@ -1075,8 +1161,12 @@ fn params_ui(ui: &mut egui::Ui, p: &mut Params, tps: f32) {
                 egui::Slider::new(&mut p.birth_interval, 10..=2000).text("birth interval (ticks)"),
             );
             ui.add(egui::Slider::new(&mut p.birth_food_cost, 0..=20).text("birth food cost"));
-            ui.add(egui::Slider::new(&mut p.claim_interval, 1..=400).text("claim interval (ticks)"));
-            ui.add(egui::Slider::new(&mut p.members_per_claim, 1..=20).text("members / claimed tile"));
+            ui.add(
+                egui::Slider::new(&mut p.claim_interval, 1..=400).text("claim interval (ticks)"),
+            );
+            ui.add(
+                egui::Slider::new(&mut p.members_per_claim, 1..=20).text("members / claimed tile"),
+            );
             ui.label(
                 egui::RichText::new("each pair of NPCs may birth one child per check, if fed")
                     .small()
@@ -1093,7 +1183,9 @@ fn params_ui(ui: &mut egui::Ui, p: &mut Params, tps: f32) {
             ui.add(
                 egui::Slider::new(&mut p.expand_claim_radius, 1..=4).text("claim radius (expand)"),
             );
-            ui.add(egui::Slider::new(&mut p.season_length, 0..=10000).text("season length (ticks)"));
+            ui.add(
+                egui::Slider::new(&mut p.season_length, 0..=10000).text("season length (ticks)"),
+            );
             ui.add(egui::Slider::new(&mut p.season_amp, 0.0..=0.95).text("season amplitude"));
             ui.add(
                 egui::Slider::new(&mut p.soil_depletion_rate, 0.0..=1.0)

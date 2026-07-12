@@ -84,15 +84,16 @@ Edited live in the Training window.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `pop_size` | 24 | brains in the population |
-| `episode_ticks` | 4000 | ticks each arena runs |
+| `pop_size` | 108 | brains in the population |
+| `episode_ticks` | 7000 | ticks each arena runs |
 | `clans_per_arena` | 6 | brains competing per arena |
-| `repeats` | 2 | how many arenas each brain appears in per generation |
+| `repeats` | 4 | minimum repeat count (CPU fan-out may raise it) |
 | `world_size` | 130 | arena grid size |
-| `arena_trees` / `arena_neutrals` | 80 / 30 | arena food and free recruits |
-| `mutation_rate` / `mutation_strength` | 0.08 / 0.3 | per-weight mutation |
-| `elite` | 3 | top brains carried over unchanged |
+| `arena_trees` / `arena_neutrals` | 110 / 48 | arena food and free recruits |
+| `mutation_rate` / `mutation_strength` | 0.10 / 0.35 | per-weight mutation |
+| `elite` | 6 | top brains carried over unchanged, alongside niche elites |
 
-> **Save/load** of a world or a champion brain to disk is not implemented yet —
-> see the [Roadmap](roadmap.md). Determinism means a `(seed, params)` pair
-> already reproduces a run exactly.
+Champion brains are serialized to `life-rs/champion.bin`; the app loads that file
+at startup. Stage/generation snapshots and marathon logs are generated artifacts.
+Full-world save/load is not implemented yet; a `(seed, params)` pair reproduces a
+run exactly in the meantime.

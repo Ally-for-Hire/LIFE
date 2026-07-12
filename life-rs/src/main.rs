@@ -12,6 +12,7 @@ mod clan;
 mod diag;
 mod entity;
 mod grid;
+mod quality;
 mod rng;
 mod trainer;
 mod world;
