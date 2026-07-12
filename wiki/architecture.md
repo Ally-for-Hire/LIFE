@@ -54,7 +54,9 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
 
 1. **grow_farms** — owned, fertile tiles grow food (× `season_factor`); farms get
    first call on the food budget so cultivated land out-produces wilderness.
+   Named phases also change soil recovery (spring 4, summer/off 2, autumn/winter 1).
 2. **update_trees** — wild food drops on *unclaimed* passable cells only (× season).
+   Forest wood regrowth is 1.5×/1×/0.5×/0× through spring/summer/autumn/winter.
 3. **clan_think** — every 120 ticks the leader's mixture-of-experts brain turns
    all six feasible action utilities into deterministic, sticky workforce quotas
    while retaining a headline mode + aggression. Inputs 16/20/21 expose road
@@ -77,6 +79,12 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
 6. **maintain** — refugee-village genesis to a clan floor (+ optional pop floor),
    **reproduce**, and every 200 ticks **prune cut-off territory** (also recomputes
    each clan's `territory` and `fertile_capacity`).
+
+`SeasonState` and `SeasonPhase` are derived from the already-persisted `tick`,
+`season_length`, and `season_amp`. They add no mutable clock or RNG draw, so V3
+saves remain byte-compatible and a loaded world crosses phase boundaries on the
+same deterministic trajectory. The hot movement path uses an integer quarter
+lookup; the sine/trend state is computed only for yield, UI, and diagnostics.
 
 ## Threading & determinism
 

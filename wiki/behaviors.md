@@ -264,11 +264,26 @@ Self-regulating: too many mouths → scarcity → die-off.
 
 ## Seasons
 
-A slow global cycle (`season_length`, `season_amp`) multiplies farm and wild-food
-yield via `season_factor` (a sine in `[1-amp, 1+amp]`). Lean seasons throttle
-food → scarcity → raiding; plentiful seasons → growth and expansion. The season
-phase is a brain input, so leaders can learn to stockpile for winter or strike
-when a rival's harvest fails.
+A slow global cycle (`season_length`, `season_amp`) still multiplies farm and
+wild-food yield via `season_factor` (a sine in `[1-amp, 1+amp]`), but each quarter
+now changes the material rules as well:
+
+| Phase | Yield direction | Behavioral pressure |
+| --- | --- | --- |
+| Spring | baseline → peak | Soil recovers 4 points per farm pass and forest wood regrows at 1.5×. |
+| Summer | peak → baseline | Normal soil and wood recovery; the main prosperity, growth, and building window. |
+| Autumn | baseline → trough | Soil recovery falls to 1, wood regrowth to 0.5×, and delivered food fills 3 ordinary food/member before protected reserve, then ordinary overflow. |
+| Winter | trough → baseline | No wood regrowth, soil recovery stays at 1, off-road movement costs `1 + 0.5 × amp`, and cold raises hunger accumulation by about `0.35 × amp`. Completed roads bypass the travel surcharge. |
+
+The existing food/capacity safety gates still control reproduction. Seasons add
+a final multiplier: 1.0 in spring/summer, `1 - 0.5 × amp` in autumn, and
+`1 - amp` in winter. Winter therefore suppresses a default-climate birth that
+passed every other gate by 55%, without scripted deaths or forced clan modes.
+
+The leader brain's existing input 15 remains normalized seasonal yield. The
+named phase and trend are derived read-only state for UI and diagnostics; no
+brain shape or save-format field changed. Setting `season_length` or
+`season_amp` to zero restores the neutral, pre-phase behavior.
 
 ## Terrain
 

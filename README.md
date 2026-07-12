@@ -68,6 +68,11 @@ cargo run --release        # first release build takes a few minutes, then it's 
   delegation from both uniform expert mixing and single-expert collapse. Promotion
   and a sixth archive slot use utilization, decisiveness, context information,
   top-1 coverage, and expert-output divergence only after survival gates pass.
+- **Seasonal Reality V1:** the yield wave is now four named behavioral phases.
+  Spring restores soil and forests, summer is the high-yield expansion window,
+  autumn diverts surplus into reserves, and winter stops wood regrowth, raises
+  off-road movement and metabolic costs, and strongly restrains births. Roads
+  bypass the winter travel surcharge, so preparation and infrastructure matter.
 - **Community Care V1:** lethal combat incapacitates clan members for a bounded
   rescue window. Nearby Gather/Defend workers abandon routine jobs, reach the
   casualty, physically carry them home, and restore them; untreated wounds bleed
@@ -95,8 +100,9 @@ cargo run --release        # first release build takes a few minutes, then it's 
 
 ## Controls
 
-- **Top bar:** Run/Pause, Step, the `ticks/s` slider, live stats, and panel
-  toggles (Controls / Inspector / Graphs / Training).
+- **Top bar:** Run/Pause, Step, the `ticks/s` slider, live stats, the current
+  season/yield/next transition, and panel toggles (Controls / Inspector / Graphs /
+  Training).
 - **Viewport:** drag to pan, scroll to zoom, click an NPC to inspect it.
 - **Controls panel:** save/load a complete world, presets, populate counts, and every tunable world
   parameter (food/trees, hunger/health, movement/perception, clans/combat,
@@ -118,6 +124,7 @@ cargo test --release tracked_champion_care_preserves_survival_gates -- --nocaptu
 cargo test --release tracked_champion_trade_preserves_survival_gates -- --nocapture
 cargo test --release tracked_champion_settlement_preserves_survival_gates -- --nocapture
 cargo test --release tracked_champion_military_completes_safe_physical_pipeline -- --nocapture
+cargo test --release seasonal_reality_benchmark_is_deterministic -- --nocapture
 cargo test --release world::persistence::tests -- --nocapture
 ```
 
@@ -159,6 +166,15 @@ Current tracked-champion result across 13 paired worlds: initial-clan survival
 throughput **0.663 / 0.563**, road utility **0.253 / 0**, and enabled fairness
 **+0.020**. The strict security gate remains in force; the integrated treatment
 currently improves rather than spends that margin.
+
+Seasonal Reality's separate 13-world, two-cycle harsh-climate contract preserves
+**1.000** mean and robust winter clan survival with neutral parity. Food security
+falls from **0.927** in summer to **0.916** in winter, while births fall from
+**0.014** of the summer cohort to **0.002** in winter; winter task coverage remains
+**0.661**. Summer stores decline **0.111 food/member** as the population grows,
+and this sample performs no summer construction or reserve release, so the
+release does not claim either outcome. Ordinary training does not pay this extra
+benchmark cost.
 
 `life-rs/champion.bin` is the tracked deployable model. Marathon logs, stage/gen
 snapshots, backup champions, and `target/` are generated locally and git-ignored.

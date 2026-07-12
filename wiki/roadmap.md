@@ -21,8 +21,10 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
   genesis re-forms villages from the masterless so the world stays a patchwork.
 - **Combat** — trespasser kills, war by aggression, *on-campaign* raiding; war
   parties (the healthy fight, the rest keep farming); loot.
-- **Seasons** — a global yield cycle (boom/bust) that drives lean-season wars; the
-  season phase is a leader-brain input.
+- **Seasonal Reality V1** — the yield cycle has named spring renewal, summer
+  prosperity, autumn reserve preparation, and winter scarcity. Phase-aware soil,
+  wood, movement, metabolism, reproduction, UI, persistence-continuation tests,
+  and a fixed harsh-climate benchmark make the year behaviorally consequential.
 - **Hierarchical neural leaders** — a master gate routing over specialist
   sub-minds (mixture-of-experts); the net picks mode + aggression directly, with
   no hand-coded strategy gates.
@@ -77,7 +79,7 @@ projects, entity-owned spears/swords/armor, exact combat effects, ablation,
 promotion gates, UI, and `LIFEWRLD` V3 persistence are implemented and verified.
 
 All planned civilization-layer milestones through Military Equipment V1 are now
-complete. Further work belongs in a new roadmap cycle rather than this milestone set.
+complete. Seasonal Reality V1 begins the next evidence-backed complexity cycle.
 
 ## Engineering notes
 

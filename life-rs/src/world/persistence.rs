@@ -263,6 +263,9 @@ impl WorldSnapshotV1 {
         if nonnegative.iter().any(|&value| value < 0) || p.starve_ticks == 0 {
             return Err(invalid("invalid negative or zero simulation parameter"));
         }
+        if (1..4).contains(&p.season_length) {
+            return Err(invalid("season length must be zero or at least four ticks"));
+        }
         let nonnegative_floats = [
             p.starve_damage,
             p.heal_rate,
@@ -833,6 +836,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::world::SeasonPhase;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_TEST_FILE: AtomicU64 = AtomicU64::new(1);
@@ -870,6 +874,29 @@ mod tests {
             loaded.step();
         }
 
+        assert_eq!(persistent_bytes(&original), persistent_bytes(&loaded));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn loaded_world_crosses_season_boundary_identically() {
+        let path = test_path("season-boundary");
+        let mut original = representative_world();
+        original.params.season_length = 400;
+        original.params.season_amp = 0.75;
+        while original.tick < 395 {
+            original.step();
+        }
+        assert_eq!(original.season_phase(), SeasonPhase::Winter);
+        original.save_file(&path).unwrap();
+        let mut loaded = World::load_file(&path).unwrap();
+
+        for _ in 0..20 {
+            original.step();
+            loaded.step();
+        }
+
+        assert_eq!(original.season_phase(), SeasonPhase::Spring);
         assert_eq!(persistent_bytes(&original), persistent_bytes(&loaded));
         cleanup(&path);
     }
@@ -966,6 +993,17 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("grid layer length"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn sub_four_tick_season_cycles_are_rejected() {
+        let path = test_path("short-season");
+        let mut snapshot = WorldSnapshotV1::capture(&representative_world());
+        snapshot.params.season_length = 2;
+        write_envelope(&path, VERSION_V1, &encode_snapshot(&snapshot).unwrap()).unwrap();
+        let error = World::load_file(&path).err().unwrap();
+        assert!(error.to_string().contains("at least four ticks"));
         cleanup(&path);
     }
 

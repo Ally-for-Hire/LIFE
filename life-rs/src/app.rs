@@ -11,7 +11,7 @@ use crate::entity::Goal;
 use crate::military::{equipment_for, ore_cargo_for};
 use crate::settlement::{active_building_counts, BuildingKind};
 use crate::trainer::{arena_count, TrainCfg, Trainer};
-use crate::world::{Params, World};
+use crate::world::{Params, SeasonPhase, SeasonState, World};
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +33,7 @@ enum Preset {
 struct History {
     pop: Vec<[f64; 2]>,
     pellets: Vec<[f64; 2]>,
+    season_yield: Vec<[f64; 2]>,
     leaders: Vec<[f64; 2]>,
     clans: Vec<[f64; 2]>,
     deaths: Vec<[f64; 2]>,
@@ -45,6 +46,7 @@ impl History {
         History {
             pop: Vec::new(),
             pellets: Vec::new(),
+            season_yield: Vec::new(),
             leaders: Vec::new(),
             clans: Vec::new(),
             deaths: Vec::new(),
@@ -55,6 +57,7 @@ impl History {
     fn clear(&mut self) {
         self.pop.clear();
         self.pellets.clear();
+        self.season_yield.clear();
         self.leaders.clear();
         self.clans.clear();
         self.deaths.clear();
@@ -66,6 +69,7 @@ impl History {
         tick: f64,
         pop: f64,
         pellets: f64,
+        season_yield: f64,
         leaders: f64,
         clans: f64,
         deaths: f64,
@@ -73,6 +77,7 @@ impl History {
     ) {
         self.pop.push([tick, pop]);
         self.pellets.push([tick, pellets]);
+        self.season_yield.push([tick, season_yield]);
         self.leaders.push([tick, leaders]);
         self.clans.push([tick, clans]);
         self.deaths.push([tick, deaths]);
@@ -81,6 +86,7 @@ impl History {
             let drop = self.pop.len() - self.cap;
             self.pop.drain(0..drop);
             self.pellets.drain(0..drop);
+            self.season_yield.drain(0..drop);
             self.leaders.drain(0..drop);
             self.clans.drain(0..drop);
             self.deaths.drain(0..drop);
@@ -233,7 +239,7 @@ impl LifeApp {
                 p.clan_grace_ticks = 1500;
                 p.war_threshold = 0.95;
             }
-            // Plenty: longer summers, gentler winters, more clans growing fat
+            // Plenty: gentler seasonal swings, more clans growing fat
             // before they ever need to fight.
             Preset::Buffet => {
                 self.p_size = 220;
@@ -529,6 +535,7 @@ impl eframe::App for LifeApp {
                 self.world.tick as f64,
                 self.world.population() as f64,
                 pellets as f64,
+                self.world.season_factor() as f64 * 100.0,
                 self.world.leader_count() as f64,
                 self.world.clan_count() as f64,
                 self.world.deaths_starved as f64,
@@ -577,6 +584,28 @@ impl eframe::App for LifeApp {
                     ui.toggle_value(&mut self.show_inspector, "Inspector");
                     ui.toggle_value(&mut self.show_controls, "Controls");
                 });
+            });
+            let season = self.world.season_state();
+            let (season_name, descriptor, color) = season_display(season.phase);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!("{season_name} \u{00b7} {descriptor}"))
+                        .strong()
+                        .color(color),
+                );
+                ui.separator();
+                ui.label(format!("yield {:.0}%", season.yield_factor * 100.0));
+                ui.separator();
+                if let Some(ticks) = season_ticks_remaining(season, self.world.params.season_length)
+                {
+                    ui.label(format!(
+                        "{} in {} ticks",
+                        next_season_name(season.phase),
+                        ticks
+                    ));
+                } else {
+                    ui.label("seasonal transitions disabled");
+                }
             });
         });
 
@@ -799,6 +828,30 @@ impl eframe::App for LifeApp {
                     ui.add_space(4.0);
                     ui.label(egui::RichText::new("NPC INSPECTOR").small().weak());
                     ui.separator();
+                    let season = self.world.season_state();
+                    let (season_name, descriptor, color) = season_display(season.phase);
+                    ui.label(egui::RichText::new("SEASON").small().weak());
+                    ui.label(
+                        egui::RichText::new(format!("{season_name} \u{2014} {descriptor}"))
+                            .strong()
+                            .color(color),
+                    );
+                    ui.add(
+                        egui::ProgressBar::new(season.phase_progress)
+                            .text(format!("yield {:.0}%", season.yield_factor * 100.0)),
+                    );
+                    if let Some(ticks) =
+                        season_ticks_remaining(season, self.world.params.season_length)
+                    {
+                        ui.label(format!(
+                            "{} in {} ticks",
+                            next_season_name(season.phase),
+                            ticks
+                        ));
+                    } else {
+                        ui.label("stable climate; transitions disabled");
+                    }
+                    ui.separator();
                     match self.selected.and_then(|id| self.world.entity_by_id(id)) {
                         Some(e) => {
                             ui.heading(format!("NPC #{}", e.id));
@@ -881,6 +934,25 @@ impl eframe::App for LifeApp {
                                 ui.label(format!("members: {}", self.world.clan_population(c.id)));
                                 ui.label(format!("stockpile food: {}", c.food));
                                 ui.label(format!("emergency reserve: {} food", c.reserve_food));
+                                let active_members = self
+                                    .world
+                                    .entities
+                                    .iter()
+                                    .filter(|member| member.clan == c.id && member.is_active())
+                                    .count();
+                                let stored_food = c.food + c.reserve_food;
+                                if active_members > 0 {
+                                    ui.label(format!(
+                                        "season stores: {} total \u{00b7} {:.2} per active member",
+                                        stored_food,
+                                        stored_food as f32 / active_members as f32
+                                    ));
+                                } else {
+                                    ui.label(format!(
+                                        "season stores: {} total \u{00b7} no active members",
+                                        stored_food
+                                    ));
+                                }
                                 ui.label(format!("stockpile wood: {}", c.wood));
                                 ui.label(if self.world.params.community_logistics {
                                     "logistics infrastructure: enabled"
@@ -1121,7 +1193,7 @@ impl eframe::App for LifeApp {
                 .default_height(170.0)
                 .show(ctx, |ui| {
                     ui.label(egui::RichText::new("PROGRESS").small().weak());
-                    ui.columns(3, |cols| {
+                    ui.columns(4, |cols| {
                         egui_plot::Plot::new("pop_plot")
                             .height(120.0)
                             .allow_scroll(false)
@@ -1152,6 +1224,15 @@ impl eframe::App for LifeApp {
                                 );
                                 p.line(
                                     egui_plot::Line::new(self.hist.combat.clone()).name("combat"),
+                                );
+                            });
+                        egui_plot::Plot::new("season_plot")
+                            .height(120.0)
+                            .allow_scroll(false)
+                            .show(&mut cols[3], |p| {
+                                p.line(
+                                    egui_plot::Line::new(self.hist.season_yield.clone())
+                                        .name("season yield %"),
                                 );
                             });
                     });
@@ -1631,9 +1712,14 @@ fn params_ui(ui: &mut egui::Ui, p: &mut Params, tps: f32) {
             ui.add(
                 egui::Slider::new(&mut p.expand_claim_radius, 1..=4).text("claim radius (expand)"),
             );
-            ui.add(
-                egui::Slider::new(&mut p.season_length, 0..=10000).text("season length (ticks)"),
+            let previous_season_length = p.season_length;
+            let season_length = ui.add(
+                egui::Slider::new(&mut p.season_length, 0..=10000)
+                    .text("year / cycle length (ticks)"),
             );
+            if season_length.changed() && (1..4).contains(&p.season_length) {
+                p.season_length = if previous_season_length >= 4 { 0 } else { 4 };
+            }
             ui.add(egui::Slider::new(&mut p.season_amp, 0.0..=0.95).text("season amplitude"));
             ui.add(
                 egui::Slider::new(&mut p.soil_depletion_rate, 0.0..=1.0)
@@ -1741,4 +1827,52 @@ fn legend_row(ui: &mut egui::Ui, color: egui::Color32, label: &str) {
         ui.painter().rect_filled(rect, 2.0, color);
         ui.label(label);
     });
+}
+
+fn season_display(phase: SeasonPhase) -> (&'static str, &'static str, egui::Color32) {
+    match phase {
+        SeasonPhase::Off => (
+            "Seasons off",
+            "stable climate",
+            egui::Color32::from_gray(170),
+        ),
+        SeasonPhase::Spring => ("Spring", "renewal", egui::Color32::from_rgb(108, 210, 132)),
+        SeasonPhase::Summer => (
+            "Summer",
+            "prosperity",
+            egui::Color32::from_rgb(244, 202, 92),
+        ),
+        SeasonPhase::Autumn => (
+            "Autumn",
+            "preparation",
+            egui::Color32::from_rgb(224, 142, 76),
+        ),
+        SeasonPhase::Winter => (
+            "Winter",
+            "harsh reality",
+            egui::Color32::from_rgb(132, 188, 232),
+        ),
+    }
+}
+
+fn next_season_name(phase: SeasonPhase) -> &'static str {
+    match phase {
+        SeasonPhase::Off => "Stable climate",
+        SeasonPhase::Spring => "Summer",
+        SeasonPhase::Summer => "Autumn",
+        SeasonPhase::Autumn => "Winter",
+        SeasonPhase::Winter => "Spring",
+    }
+}
+
+fn season_ticks_remaining(state: SeasonState, season_length: i32) -> Option<i32> {
+    if state.phase == SeasonPhase::Off || season_length <= 0 {
+        return None;
+    }
+    let quarter_ticks = season_length as f32 / 4.0;
+    Some(
+        ((1.0 - state.phase_progress.clamp(0.0, 1.0)) * quarter_ticks)
+            .ceil()
+            .max(1.0) as i32,
+    )
 }

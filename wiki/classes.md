@@ -27,6 +27,7 @@ The single source of truth and the per-tick simulation.
 | `maintain_clans` | clan floor — re-form villages from refugees when war thins the field |
 | `champion: Option<Brain>` | arena trainer's best brain; new villages may inherit it |
 | `step()` | one tick (farms → trees → think → entities → recruit → combat → raid → births → prune) |
+| `season_state()` / `season_phase()` | named, read-only seasonal phase, progress, yield, and trend derived from tick + parameters |
 | `season_factor()` | seasonal yield multiplier (sine over `season_length`) |
 | `populate(neutrals, trees, clans)` | generate terrain and seed the world |
 | `setup_arena(brains, trees, neutrals)` | headless training arena setup |
@@ -45,6 +46,10 @@ Every tunable variable, read live each tick: food/tree rates, **farms**
 `claim_interval`, `members_per_claim`, reproduction (`birth_*`), and terrain
 (`terrain_on`, `water_level`, `mountain_level`). `community_logistics` is the
 live infrastructure treatment/ablation switch. See [Parameters](save-format.md).
+
+`SeasonPhase` is `Off`, `Spring`, `Summer`, `Autumn`, or `Winter`.
+`SeasonState` carries cycle/phase progress, yield factor, and trend for UI and
+diagnostics; it is deliberately not stored in `World` or the persistence DTOs.
 
 ## `Entity` + `Goal` (`entity.rs`)
 

@@ -437,10 +437,37 @@ baseline remains robust survival **1.000**, food security **0.933**, and clan-vs
 neutral fairness **+0.024**. The integrated release suite passes 103 tests with one
 ignored marathon.
 
+### A24 — Seasonal Reality V1
+
+The old season system changed only the farm/wild-food sine multiplier. It now
+has four named, materially different quarters without adding scripted strategy or
+changing the fixed brain/save shapes. Spring restores soil and forest wood;
+summer is the high-yield baseline; autumn slows regeneration and routes delivered
+surplus into protected reserve after a three-food/member working floor; winter
+halts wood regrowth, makes off-road travel costlier, adds modest staggered cold
+metabolism, and suppresses births. Completed roads bypass the winter surcharge.
+
+The UI exposes phase, mood, yield, transition timing, clan stores/member, and a
+seasonal graph. Phase state derives entirely from tick and existing parameters,
+so `LIFEWRLD` remains V3. A persistence test saves in winter and proves exact
+continuation across the spring boundary.
+
+The fixed 13-world, two-cycle amplitude-0.90 benchmark measures the second
+summer and winter after warmup. The tracked champion preserves **1.000** mean and
+robust winter clan survival and neutral parity. Food security falls from
+**0.927** in summer to **0.916** in winter; winter task coverage is **0.661**.
+Births contract from **0.014** in summer to **0.002** in winter. Summer stores
+fall **0.111 food/member** as the cohort grows, with no construction in that
+quarter; winter stores rise and natural reserve releases remain zero. Reserve
+use and summer building were therefore not added as promotion gates or claimed
+as observed outcomes. The integrated suite passes **111 tests** with one ignored
+marathon.
+
 ## Open ideas / next
 
-- **Next roadmap cycle:** all requested civilization milestones through Military
-  Equipment V1 are complete; choose the next evidence-backed layer separately.
+- **Seasonal follow-up:** calibrate a genuine reserve emergency only if it can be
+  added without regressing clan survival, neutral fairness, or causing famine
+  baby booms; then make reserve use a promotion gate.
 - **More sub-minds / deeper hierarchy:** specialist nets for diplomacy, logistics;
   a meta-gate over gates.
 - **Live-world continuous evolution without violence:** cultural imitation so

@@ -374,6 +374,24 @@ fn diag_logistics_ablation() {
     );
 }
 
+/// Phase-aware Seasonal Reality V1 report for the tracked champion. The first
+/// fixed cycle is warm-up; the second summer and winter are scored separately.
+#[test]
+fn diag_seasonal_reality() {
+    use crate::brain::Brain;
+    use crate::trainer::{benchmark_seasonal_quality, CHAMPION_PATH, MAX_STAGE};
+    let champ = match Brain::load(CHAMPION_PATH) {
+        Ok(brain) => brain,
+        Err(error) => {
+            println!("no champion to benchmark ({error})");
+            return;
+        }
+    };
+    let report = benchmark_seasonal_quality(&champ, &Params::default(), MAX_STAGE, 13, 0x05EA_50A1);
+    println!("\n== Seasonal Reality V1 fixed-world contract ==");
+    println!("{report:#?}");
+}
+
 /// Probe the trained champion's mixture-of-experts: show qualitative routing
 /// examples, then report the authoritative contextual-specialization contract.
 #[test]

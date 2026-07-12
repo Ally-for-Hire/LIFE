@@ -28,7 +28,8 @@ master controller routing over specialist sub-minds). Territory is the economy:
 **owned, fertile land grows food** (farms), and only its owners may harvest it
 (despotic exclusion), so villages settle on good land, work it within a home
 range, expand onto fertile frontier, take in refugees, and **fight over the best
-valleys** — especially when **seasons** turn lean. Almost nothing is hand-scripted:
+valleys** — especially across named seasons: spring renewal, summer prosperity,
+autumn preparation, and winter scarcity. Almost nothing is hand-scripted:
 the nets allocate a simultaneous workforce, communities turn forest wood into
 roads and emergency reserves, and evolution (offline in arenas + in-vivo in the live
 world) finds the strategies. See [prior-art.md](prior-art.md) and

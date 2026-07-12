@@ -10,6 +10,8 @@ shape the layout like a game HUD.
   you can watch a single NPC decide; at 5000 it's whole-civilization dynamics.
 - **Live stats:** tick, NPC count, clans, born, food on map, starved (and
   rate), killed, and measured ticks/s.
+- **Season strip:** named phase and mood, current yield percentage, and ticks to
+  the next transition. It reports a stable climate when seasons are disabled.
 - **Toggles:** Controls · Inspector · Graphs · Training.
 
 ## Viewport
@@ -51,6 +53,9 @@ shape the layout like a game HUD.
 
 - The selected NPC's **idea** (current goal), sticky **community role**, health
   and hunger bars, carried food/wood, speed, and position.
+- The current season, progress through the phase, yield, next transition, and —
+  for a selected clan member — total ordinary-plus-reserve stores per active
+  member.
 - If it belongs to a clan: the clan's **order (mode)**, live workforce mix,
   members, ordinary/reserve food, shared wood, public-work counters, territory,
   aggression, K/L/recruited, food delivered, real road member-steps, measured
@@ -65,8 +70,8 @@ shape the layout like a game HUD.
 
 ## Graphs panel (bottom)
 
-Rolling plots of **population & leaders & clans**, **food on the map**, and
-**starvation vs combat deaths**.
+Rolling plots of **population & leaders & clans**, **food on the map**,
+**starvation vs combat deaths**, and **seasonal yield percentage**.
 
 ## Training window (floating)
 

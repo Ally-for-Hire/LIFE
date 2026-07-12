@@ -81,11 +81,14 @@ const WORK_ASSIGNMENT_TICKS: i32 = CLAN_THINK_INTERVAL * 2;
 const FOREST_WOOD_CAP: u8 = 6;
 const WOOD_REGROW_INTERVAL: i32 = 360;
 const WOOD_REGROW_CHANCE: f32 = 0.08;
+const SPRING_WOOD_REGROW_MULTIPLIER: f32 = 1.5;
+const AUTUMN_WOOD_REGROW_MULTIPLIER: f32 = 0.5;
 const ROAD_BUILD_INTERVAL: i32 = 60;
 const ROAD_WOOD_COST: i32 = 2;
 const ROAD_MIN_TRAFFIC: u16 = 3;
 const RESERVE_FOOD_PER_MEMBER: i32 = 4;
 const STOCKPILE_FOOD_PER_MEMBER: i32 = 4;
+const AUTUMN_STOCKPILE_FOOD_PER_MEMBER: i32 = 3;
 const RESCUE_WINDOW_TICKS: i32 = 240;
 const RESCUE_RADIUS: i32 = 12;
 const RESCUE_REVIVE_HEALTH: f32 = 0.35;
@@ -115,6 +118,33 @@ const MILITARY_PLAN_INTERVAL: i32 = 30;
 /// which makes them a trespasser and triggers the owner's defense. Below it,
 /// a clan's crops feed only its own people (despotic exclusion).
 const EMERGENCY_STEAL: f32 = 0.9;
+
+/// A named quarter of the existing global yield cycle. `Off` is the neutral
+/// state when either seasonal parameter disables the cycle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SeasonPhase {
+    Off,
+    Spring,
+    Summer,
+    Autumn,
+    Winter,
+}
+
+/// Read-only seasonal state derived entirely from persisted tick/parameter
+/// values. It deliberately owns no simulation state, so save compatibility and
+/// exact post-load continuation do not depend on a new serialized field.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SeasonState {
+    pub phase: SeasonPhase,
+    /// Progress through the full cycle in `[0, 1)`.
+    pub cycle_progress: f32,
+    /// Progress through the current named quarter in `[0, 1)`.
+    pub phase_progress: f32,
+    /// Existing sine-wave food multiplier.
+    pub yield_factor: f32,
+    /// Cosine trend: positive means improving, negative means worsening.
+    pub trend: f32,
+}
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Params {
@@ -605,7 +635,16 @@ impl World {
             return;
         }
         let pop = self.clan_roster_size(cidx);
-        let ordinary_floor = pop * STOCKPILE_FOOD_PER_MEMBER;
+        // Autumn harvests prepare for the falling half of the cycle: once a
+        // smaller working buffer is ready, deliveries fill protected storage.
+        // After the existing reserve cap is full, normal stockpile growth
+        // resumes, so prosperous clans can still fund civic work.
+        let ordinary_per_member = if self.season_phase() == SeasonPhase::Autumn {
+            AUTUMN_STOCKPILE_FOOD_PER_MEMBER
+        } else {
+            STOCKPILE_FOOD_PER_MEMBER
+        };
+        let ordinary_floor = pop * ordinary_per_member;
         let base_reserve_cap = pop * RESERVE_FOOD_PER_MEMBER;
         let reserve_cap = self.reserve_capacity(cidx);
         let reserve_before = self.clans[cidx].reserve_food;
@@ -1504,7 +1543,9 @@ impl World {
         let i = self.grid.idx(x, y);
         let mut c = terrain_move_cost(self.grid.terrain[i]);
         if self.params.community_logistics && self.grid.road[i] > 0 {
-            c *= 0.5; // roads halve cost (built later; hook ready)
+            c *= 0.5; // roads retain dependable travel through winter
+        } else {
+            c *= self.seasonal_offroad_multiplier();
         }
         c
     }
@@ -1545,10 +1586,11 @@ impl World {
         self.occupied[ni] += 1;
         self.grid.traffic[ni] = self.grid.traffic[ni].saturating_add(1);
         if self.params.community_logistics && self.grid.road[ni] > 0 && e.clan >= 0 {
+            let saved =
+                road_cost_saved_milli(self.grid.terrain[ni], self.seasonal_offroad_multiplier());
             if let Some(cidx) = self.clan_index(e.clan) {
                 self.clans[cidx].stats.road_steps += 1;
-                self.clans[cidx].stats.road_cost_saved_milli +=
-                    road_cost_saved_milli(self.grid.terrain[ni]);
+                self.clans[cidx].stats.road_cost_saved_milli += saved;
             }
         }
         e.move_budget -= c;
@@ -1785,7 +1827,9 @@ impl World {
             let reserve_pressure = ((self.clans[ci].food - reserve_floor) as f32
                 / (pop * 8).max(1) as f32)
                 .clamp(0.0, 1.0);
-            let birth_chance = chance * reserve_pressure;
+            // Prosperity never boosts the configured rate, while the falling
+            // and lean quarters prevent a famine-driven baby boom.
+            let birth_chance = chance * reserve_pressure * self.seasonal_birth_multiplier();
             let base = match self.clans[ci].stockpile {
                 Some(p) => Some(p),
                 None => self.entity_pos(self.clans[ci].leader_id),
@@ -2312,6 +2356,7 @@ impl World {
                 let (trade_relation, trade_partners, trade_volume) = self.trade_signals(idx);
                 let (settlement_development, technology) = self.settlement_signals(idx);
                 let (military_strength, ore_access) = self.military_signals(idx);
+                let season_yield = self.season_factor();
 
                 // The situation vector the master + sub-minds read. Normalised,
                 // information-rich, and free of behavioural prescriptions — what
@@ -2332,7 +2377,7 @@ impl World {
                     if frontier_exists { 1.0 } else { 0.0 }, // 12 can expand?
                     if enemy_near { 1.0 } else { 0.0 }, // 13 enemy nearby (threat)
                     world_food,     // 14 food climate (famine sense)
-                    (self.season_factor() - 1.0) / self.params.season_amp.max(0.01), // 15 season phase [-1,1]
+                    (season_yield - 1.0) / self.params.season_amp.max(0.01), // 15 seasonal yield [-1,1]
                     // --- RESERVED future-feature inputs (read 0.0 until the world
                     //     wires them up; the brain's size never changes) ---
                     road_access,            // 16 roads / logistics access near home
@@ -2348,13 +2393,13 @@ impl World {
                     trade_relation,         // 22 relation with nearest trade partner
                     trade_partners,         // 23 allies / active trade partners
                     trade_volume,           // 24 recent delivered trade volume
-                    0.0,                    // 25 day/night phase (distinct from season)
+                    0.0, // 25 reserved; live trend would destabilize the tracked champion
                     self.clans[idx].soil_depletion.min(1.0), // 26 soil depletion of owned tiles
-                    self.disaster_level,    // 27 active disaster/event severity
-                    avg_health,             // 28 average member health
-                    0.0,                    // 29 water / coast / river access of territory
-                    ore_access,             // 30 stored / reachable mineral access
-                    1.0,                    // 31 bias
+                    self.disaster_level, // 27 active disaster/event severity
+                    avg_health, // 28 average member health
+                    0.0, // 29 water / coast / river access of territory
+                    ore_access, // 30 stored / reachable mineral access
+                    1.0, // 31 bias
                 ];
 
                 // The master routes; the sub-minds propose. We take the blended
@@ -2608,7 +2653,7 @@ impl World {
     }
 
     fn update_entity(&mut self, e: &mut Entity) {
-        e.ticks_since_food += 1;
+        e.ticks_since_food += self.seasonal_hunger_increment(e.id);
         e.attack_cooldown = (e.attack_cooldown - 1).max(0);
         if e.incapacitated_until > 0 {
             e.goal = Goal::Incapacitated;
@@ -3927,13 +3972,14 @@ impl World {
         if self.tick % WOOD_REGROW_INTERVAL != 0 {
             return;
         }
+        let regrow_chance = self.seasonal_wood_regrow_chance();
         for i in 0..self.grid.wood.len() {
             if self.grid.terrain[i] != terrain::FOREST {
                 continue;
             }
             // Always consume exactly one roll per forest tile so paired on/off
             // worlds retain common random numbers despite different depletion.
-            let regrows = self.rng.chance(WOOD_REGROW_CHANCE);
+            let regrows = self.rng.chance(regrow_chance);
             if self.params.community_logistics && self.grid.wood[i] < FOREST_WOOD_CAP && regrows {
                 self.grid.wood[i] += 1;
             }
@@ -4339,13 +4385,113 @@ impl World {
     /// Seasonal yield multiplier in [1-amp, 1+amp]: a slow sine over the world
     /// tick. Lean seasons throttle both farms and wild food, so a clan that grew
     /// fat in summer faces a winter test — adapt, conserve, or raid.
-    pub fn season_factor(&self) -> f32 {
+    /// Named seasonal state for UI/diagnostics. It is derived from the existing
+    /// persisted tick and parameters; no additional save state is required.
+    pub fn season_state(&self) -> SeasonState {
         let len = self.params.season_length;
         if len <= 0 || self.params.season_amp <= 0.0 {
-            return 1.0;
+            return SeasonState {
+                phase: SeasonPhase::Off,
+                cycle_progress: 0.0,
+                phase_progress: 0.0,
+                yield_factor: 1.0,
+                trend: 0.0,
+            };
         }
-        let phase = (self.tick as f32 / len as f32) * std::f32::consts::TAU;
-        (1.0 + self.params.season_amp * phase.sin()).max(0.0)
+
+        let cycle_progress = self.tick.rem_euclid(len) as f32 / len as f32;
+        let quarter = cycle_progress * 4.0;
+        let phase = match quarter.floor() as i32 {
+            0 => SeasonPhase::Spring,
+            1 => SeasonPhase::Summer,
+            2 => SeasonPhase::Autumn,
+            _ => SeasonPhase::Winter,
+        };
+        // Use the bounded remainder rather than the absolute tick so the wave
+        // stays smooth after very long runs where f32 cannot represent every
+        // integer tick exactly.
+        let angle = cycle_progress * std::f32::consts::TAU;
+        SeasonState {
+            phase,
+            cycle_progress,
+            phase_progress: quarter.fract(),
+            yield_factor: (1.0 + self.params.season_amp * angle.sin()).max(0.0),
+            trend: angle.cos(),
+        }
+    }
+
+    #[inline]
+    pub fn season_phase(&self) -> SeasonPhase {
+        let len = self.params.season_length;
+        if len <= 0 || self.params.season_amp <= 0.0 {
+            return SeasonPhase::Off;
+        }
+        match (i64::from(self.tick.rem_euclid(len)) * 4 / i64::from(len)) as i32 {
+            0 => SeasonPhase::Spring,
+            1 => SeasonPhase::Summer,
+            2 => SeasonPhase::Autumn,
+            _ => SeasonPhase::Winter,
+        }
+    }
+
+    #[inline]
+    fn seasonal_soil_recovery(&self) -> u8 {
+        match self.season_phase() {
+            SeasonPhase::Spring => 4,
+            SeasonPhase::Summer | SeasonPhase::Off => 2,
+            SeasonPhase::Autumn | SeasonPhase::Winter => 1,
+        }
+    }
+
+    #[inline]
+    fn seasonal_wood_regrow_chance(&self) -> f32 {
+        let multiplier = match self.season_phase() {
+            SeasonPhase::Spring => SPRING_WOOD_REGROW_MULTIPLIER,
+            SeasonPhase::Summer | SeasonPhase::Off => 1.0,
+            SeasonPhase::Autumn => AUTUMN_WOOD_REGROW_MULTIPLIER,
+            SeasonPhase::Winter => 0.0,
+        };
+        (WOOD_REGROW_CHANCE * multiplier).clamp(0.0, 1.0)
+    }
+
+    #[inline]
+    fn seasonal_offroad_multiplier(&self) -> f32 {
+        if self.season_phase() == SeasonPhase::Winter {
+            1.0 + 0.5 * self.params.season_amp.max(0.0)
+        } else {
+            1.0
+        }
+    }
+
+    #[inline]
+    fn seasonal_birth_multiplier(&self) -> f32 {
+        let amp = self.params.season_amp.clamp(0.0, 1.0);
+        match self.season_phase() {
+            SeasonPhase::Autumn => 1.0 - 0.5 * amp,
+            SeasonPhase::Winter => 1.0 - amp,
+            SeasonPhase::Off | SeasonPhase::Spring | SeasonPhase::Summer => 1.0,
+        }
+    }
+
+    /// Winter raises subsistence cost without adding direct cold damage. The
+    /// extra hunger tick is staggered by entity id, deterministic, and modest:
+    /// about +20% at the default amplitude and +33% in the harsh benchmark.
+    #[inline]
+    fn seasonal_hunger_increment(&self, entity_id: u32) -> i32 {
+        if self.season_phase() != SeasonPhase::Winter {
+            return 1;
+        }
+        let extra_rate = (self.params.season_amp.clamp(0.0, 1.0) * 0.35).min(0.5);
+        if extra_rate <= 0.0 {
+            return 1;
+        }
+        let interval = (1.0 / extra_rate).round().max(2.0) as i32;
+        let stagger = i64::from(self.tick) + i64::from(entity_id);
+        1 + i32::from(stagger.rem_euclid(i64::from(interval)) == 0)
+    }
+
+    pub fn season_factor(&self) -> f32 {
+        self.season_state().yield_factor
     }
 
     /// Farms: every `farm_interval` ticks, owned, fertile, passable tiles grow
@@ -4361,6 +4507,7 @@ impl World {
         let cells = (self.grid.size as i64 * self.grid.size as i64) as f32;
         let max_pellets = (cells * self.params.max_pellet_fraction.clamp(0.0, 1.0)) as usize;
         let deplete_on = self.params.soil_depletion_rate > 0.0;
+        let soil_recovery = self.seasonal_soil_recovery();
         // Nothing to do if farms can't grow and there's no soil to recover.
         if (yield_rate <= 0.0 || self.pellet_total >= max_pellets) && !deplete_on {
             return;
@@ -4377,7 +4524,7 @@ impl World {
             }
             // Soil recovers steadily on owned land (only when the feature is on).
             if deplete_on && self.grid.depletion[i] > 0 {
-                self.grid.depletion[i] = self.grid.depletion[i].saturating_sub(2);
+                self.grid.depletion[i] = self.grid.depletion[i].saturating_sub(soil_recovery);
             }
             if self.grid.pellet[i] != 0 || self.pellet_total >= max_pellets || yield_rate <= 0.0 {
                 continue;
@@ -4473,15 +4620,14 @@ fn terrain_move_cost(t: u8) -> f32 {
     }
 }
 
-fn road_cost_saved_milli(t: u8) -> u64 {
-    match t {
-        terrain::MOUNTAIN => 1500,
-        terrain::HILL => 800,
-        terrain::SAND => 700,
-        terrain::FOREST => 625,
-        terrain::WATER => 0,
-        _ => 500,
+fn road_cost_saved_milli(t: u8, offroad_multiplier: f32) -> u64 {
+    let base = terrain_move_cost(t);
+    if !base.is_finite() {
+        return 0;
     }
+    ((base * offroad_multiplier.max(1.0) - base * 0.5) * 1000.0)
+        .round()
+        .max(0.0) as u64
 }
 
 fn route_distance_sq(point: (i32, i32), start: (i32, i32), end: (i32, i32)) -> i64 {
@@ -4571,6 +4717,153 @@ mod tests {
             )
         };
         assert_eq!(run(), run(), "same seed must produce identical runs");
+    }
+
+    #[test]
+    fn seasonal_state_names_quarters_tracks_trend_and_is_neutral_when_off() {
+        let mut world = World::new(8, 11);
+        world.params.season_length = 400;
+        world.params.season_amp = 0.5;
+        for (tick, phase, factor, trend) in [
+            (0, SeasonPhase::Spring, 1.0, 1.0),
+            (100, SeasonPhase::Summer, 1.5, 0.0),
+            (200, SeasonPhase::Autumn, 1.0, -1.0),
+            (300, SeasonPhase::Winter, 0.5, 0.0),
+            (400, SeasonPhase::Spring, 1.0, 1.0),
+        ] {
+            world.tick = tick;
+            let state = world.season_state();
+            assert_eq!(state.phase, phase);
+            assert!((state.yield_factor - factor).abs() < 1e-5);
+            assert!((state.trend - trend).abs() < 1e-5);
+        }
+
+        world.tick = 50;
+        let spring = world.season_state();
+        world.tick = 150;
+        let autumn_approach = world.season_state();
+        assert!((spring.yield_factor - autumn_approach.yield_factor).abs() < 1e-5);
+        assert!(spring.trend > 0.0 && autumn_approach.trend < 0.0);
+
+        world.params.season_amp = 0.0;
+        let off = world.season_state();
+        assert_eq!(off.phase, SeasonPhase::Off);
+        assert_eq!(off.yield_factor, 1.0);
+        assert_eq!(off.trend, 0.0);
+        assert_eq!(world.seasonal_soil_recovery(), 2);
+        assert_eq!(world.seasonal_wood_regrow_chance(), WOOD_REGROW_CHANCE);
+        assert_eq!(world.seasonal_offroad_multiplier(), 1.0);
+        assert_eq!(world.seasonal_birth_multiplier(), 1.0);
+    }
+
+    #[test]
+    fn seasonal_soil_recovery_and_birth_restraint_follow_named_phases() {
+        let mut world = World::new(8, 13);
+        world.params.season_length = 400;
+        world.params.season_amp = 0.6;
+        world.params.farm_interval = 1;
+        world.params.farm_yield = 0.0;
+        world.params.soil_depletion_rate = 1.0;
+        let cell = 0;
+        world.grid.owner[cell] = 1;
+        world.grid.terrain[cell] = terrain::PLAINS;
+
+        let mut recovery_at = |tick| {
+            world.tick = tick;
+            world.grid.depletion[cell] = 100;
+            world.grow_farms();
+            100 - world.grid.depletion[cell]
+        };
+        assert_eq!(recovery_at(0), 4);
+        assert_eq!(recovery_at(100), 2);
+        assert_eq!(recovery_at(200), 1);
+        assert_eq!(recovery_at(300), 1);
+
+        world.tick = 0;
+        assert_eq!(world.seasonal_birth_multiplier(), 1.0);
+        world.tick = 100;
+        assert_eq!(world.seasonal_birth_multiplier(), 1.0);
+        world.tick = 200;
+        assert!((world.seasonal_birth_multiplier() - 0.7).abs() < 1e-6);
+        world.tick = 300;
+        assert!((world.seasonal_birth_multiplier() - 0.4).abs() < 1e-6);
+        assert_eq!(world.seasonal_wood_regrow_chance(), 0.0);
+        let winter_hunger: i32 = (300..330)
+            .map(|tick| {
+                world.tick = tick;
+                world.seasonal_hunger_increment(7)
+            })
+            .sum();
+        assert!(winter_hunger > 30, "winter must raise subsistence cost");
+        world.tick = 100;
+        assert_eq!(world.seasonal_hunger_increment(7), 1);
+    }
+
+    #[test]
+    fn autumn_deliveries_prepare_reserve_before_normal_overflow() {
+        let mut world = World::new(50, 19);
+        world.populate(0, 0, 1);
+        world.params.season_length = 400;
+        world.params.season_amp = 0.5;
+        let clan = 0;
+        let pop = world.clan_roster_size(clan);
+        world.tick = 200;
+        world.clans[clan].food = pop * AUTUMN_STOCKPILE_FOOD_PER_MEMBER;
+        world.clans[clan].reserve_food = 0;
+        world.deposit_food(clan, 1);
+        assert_eq!(
+            world.clans[clan].food,
+            pop * AUTUMN_STOCKPILE_FOOD_PER_MEMBER
+        );
+        assert_eq!(world.clans[clan].reserve_food, 1);
+
+        world.clans[clan].reserve_food = world.reserve_capacity(clan);
+        world.deposit_food(clan, 1);
+        assert_eq!(
+            world.clans[clan].food,
+            pop * AUTUMN_STOCKPILE_FOOD_PER_MEMBER + 1
+        );
+
+        world.tick = 100;
+        world.clans[clan].food = pop * AUTUMN_STOCKPILE_FOOD_PER_MEMBER;
+        world.clans[clan].reserve_food = 0;
+        world.deposit_food(clan, 1);
+        assert_eq!(
+            world.clans[clan].food,
+            pop * AUTUMN_STOCKPILE_FOOD_PER_MEMBER + 1,
+            "summer keeps the existing four-per-member ordinary floor"
+        );
+        assert_eq!(world.clans[clan].reserve_food, 0);
+    }
+
+    #[test]
+    fn winter_slows_offroad_travel_while_roads_bypass_and_account_for_it() {
+        let mut world = World::new(50, 21);
+        world.populate(0, 0, 1);
+        world.params.season_length = 400;
+        world.params.season_amp = 0.6;
+        world.tick = 300;
+        let clan = 0;
+        let leader_id = world.clans[clan].leader_id;
+        let entity_index = world.entity_index(leader_id).unwrap();
+        let mut leader = world.entities.remove(entity_index);
+        let target = if leader.x + 1 < world.grid.size {
+            (leader.x + 1, leader.y)
+        } else {
+            (leader.x - 1, leader.y)
+        };
+        let target_index = world.grid.idx(target.0, target.1);
+        world.grid.terrain[target_index] = terrain::PLAINS;
+        world.grid.road[target_index] = 0;
+        assert!((world.move_cost_to(target.0, target.1) - 1.3).abs() < 1e-6);
+
+        world.grid.road[target_index] = 1;
+        assert_eq!(world.move_cost_to(target.0, target.1), 0.5);
+        leader.move_budget = 10.0;
+        world.rebuild_occupancy(std::slice::from_ref(&leader));
+        assert!(world.try_step(&mut leader, target.0, target.1));
+        assert_eq!(world.clans[clan].stats.road_steps, 1);
+        assert_eq!(world.clans[clan].stats.road_cost_saved_milli, 800);
     }
 
     #[test]

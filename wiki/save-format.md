@@ -59,8 +59,12 @@ season cycle turns plenty into scarcity.
 | `expand_claim_radius` | 1 | radius of a single worker land claim while expanding |
 | `claim_interval` | 14 | min ticks between a clan's territory claims |
 | `members_per_claim` | 2 | population per unit of fertile capacity (sets the pop cap) |
-| `season_length` | 3000 | ticks per full season cycle (0 = seasons off) |
-| `season_amp` | 0.55 | yield swing amplitude; lean season yields ≈ `1-amp`× |
+| `season_length` | 3000 | ticks per full four-phase year/cycle (0 = seasons off) |
+| `season_amp` | 0.55 | yield swing and harshness amplitude; lean yield ≈ `1-amp`× and winter pressure scales with amp |
+
+The named phase is derived from `tick % season_length`; no new field is saved.
+Seasonal Reality V1 therefore stays within `LIFEWRLD` V3. Existing snapshots
+continue exactly under the current rules, including across a phase boundary.
 
 ## Growth / expansion
 

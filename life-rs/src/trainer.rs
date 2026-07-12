@@ -7,14 +7,15 @@
 //! tiny. That parallelizes perfectly across cores but would be far slower on a
 //! GPU. The GPU is already busy rendering the live view.
 
-use crate::brain::Brain;
+use crate::brain::{Brain, N_MODES};
+use crate::clan::ClanMode;
 use crate::quality::{
     contextual_specialization_metrics, routing_metrics, score_clan as score_clan_quality,
     ContextualSpecializationMetrics, QualityScore, StrategyNiche, FAIRNESS_FLOOR,
     N_STRATEGY_NICHES, SECURITY_FLOOR, SURVIVAL_FLOOR,
 };
 use crate::rng::Rng;
-use crate::world::{Params, World};
+use crate::world::{Params, SeasonPhase, World};
 use rayon::prelude::*;
 use std::collections::HashSet;
 #[cfg(test)]
@@ -239,6 +240,34 @@ pub struct MilitaryBenchmarkReport {
     pub security_delta: f32,
     pub fairness_delta: f32,
     pub survival_non_regression: bool,
+}
+
+/// A bounded, phase-aware contract for one brain across fixed seasonal worlds.
+/// The first cycle is warm-up; the second summer and winter are measured
+/// separately so end-of-episode prosperity cannot hide winter failure.
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SeasonalBenchmarkReport {
+    pub worlds: usize,
+    pub mean_winter_clan_survival: f32,
+    pub robust_winter_clan_survival: f32,
+    pub mean_winter_neutral_survival: f32,
+    pub mean_winter_fairness_delta: f32,
+    pub worst_winter_fairness_delta: f32,
+    pub mean_summer_security: f32,
+    pub mean_winter_security: f32,
+    pub summer_surplus_gain_per_member: f32,
+    pub summer_positive_surplus_world_fraction: f32,
+    pub summer_construction_work: f32,
+    pub summer_completed_buildings: f32,
+    pub summer_construction_world_fraction: f32,
+    pub winter_reserve_released: f32,
+    pub winter_reserve_world_fraction: f32,
+    pub winter_food_change_per_member: f32,
+    pub winter_task_coverage: f32,
+    pub summer_birth_ratio: f32,
+    pub winter_birth_ratio: f32,
+    pub measured_cycle_birth_ratio: f32,
 }
 
 #[derive(Clone)]
@@ -1767,6 +1796,347 @@ pub fn benchmark_ai_quality(
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Default)]
+struct SeasonalSnapshot {
+    active_clan_members: usize,
+    total_population: usize,
+    stored_food: i32,
+    construction_work: u32,
+    completed_buildings: u32,
+    reserve_released: u32,
+    role_ticks: [u64; N_MODES],
+    births: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Default)]
+struct SeasonalWorldObservation {
+    winter_clan_survival: f32,
+    winter_neutral_survival: f32,
+    winter_fairness_delta: f32,
+    summer_security: f32,
+    winter_security: f32,
+    summer_surplus_gain_per_member: f32,
+    summer_construction_work: f32,
+    summer_completed_buildings: f32,
+    winter_reserve_released: f32,
+    winter_food_change_per_member: f32,
+    winter_task_coverage: f32,
+    summer_birth_ratio: f32,
+    winter_birth_ratio: f32,
+    measured_cycle_birth_ratio: f32,
+}
+
+/// Fixed two-cycle seasonal benchmark. It is intentionally absent from normal
+/// generation evaluation. Promotion integration remains fail-closed until the
+/// fixed tracked-champion run naturally exercises reserve release; otherwise a
+/// zero-valued "gate" would claim evidence it did not observe.
+#[cfg(test)]
+pub fn benchmark_seasonal_quality(
+    brain: &Brain,
+    base: &Params,
+    stage: u32,
+    n_worlds: usize,
+    seed: u64,
+) -> SeasonalBenchmarkReport {
+    if n_worlds == 0 {
+        return SeasonalBenchmarkReport::default();
+    }
+
+    const CYCLE_TICKS: i32 = 3200;
+    const SEASON_AMPLITUDE: f32 = 0.90;
+    let observations: Vec<SeasonalWorldObservation> = (0..n_worlds)
+        .into_par_iter()
+        .map(|wi| {
+            let mut wr = Rng::new(seed ^ (wi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let eff_stage = (wi as u32) % (stage + 1);
+            let mut spec = random_world_spec(base, &mut wr, eff_stage);
+            spec.params.season_length = CYCLE_TICKS;
+            spec.params.season_amp = SEASON_AMPLITUDE;
+            // A fixed reserve test, not a second curriculum: enough summer to
+            // prepare, followed by a winter long enough to outlast unaided food
+            // memory on every stage without making ordinary training harsher.
+            spec.params.max_pellet_fraction = spec.params.max_pellet_fraction.min(0.045);
+            spec.params.farm_yield = spec.params.farm_yield.min(0.12);
+            spec.params.tree_per_cycle = spec.params.tree_per_cycle.min(3);
+            spec.params.starve_ticks = spec.params.starve_ticks.min(800);
+            let arena_seed = seed.wrapping_add((wi as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+            run_seasonal_benchmark_world(brain, &spec, CYCLE_TICKS, arena_seed)
+        })
+        .collect();
+
+    let mut report = SeasonalBenchmarkReport {
+        worlds: n_worlds,
+        robust_winter_clan_survival: 1.0,
+        worst_winter_fairness_delta: 1.0,
+        ..SeasonalBenchmarkReport::default()
+    };
+    let mut positive_surplus_worlds = 0usize;
+    let mut construction_worlds = 0usize;
+    let mut reserve_worlds = 0usize;
+    for observation in observations {
+        report.mean_winter_clan_survival += observation.winter_clan_survival;
+        report.robust_winter_clan_survival = report
+            .robust_winter_clan_survival
+            .min(observation.winter_clan_survival);
+        report.mean_winter_neutral_survival += observation.winter_neutral_survival;
+        report.mean_winter_fairness_delta += observation.winter_fairness_delta;
+        report.worst_winter_fairness_delta = report
+            .worst_winter_fairness_delta
+            .min(observation.winter_fairness_delta);
+        report.mean_summer_security += observation.summer_security;
+        report.mean_winter_security += observation.winter_security;
+        report.summer_surplus_gain_per_member += observation.summer_surplus_gain_per_member;
+        report.summer_construction_work += observation.summer_construction_work;
+        report.summer_completed_buildings += observation.summer_completed_buildings;
+        report.winter_reserve_released += observation.winter_reserve_released;
+        report.winter_food_change_per_member += observation.winter_food_change_per_member;
+        report.winter_task_coverage += observation.winter_task_coverage;
+        report.summer_birth_ratio += observation.summer_birth_ratio;
+        report.winter_birth_ratio += observation.winter_birth_ratio;
+        report.measured_cycle_birth_ratio += observation.measured_cycle_birth_ratio;
+        positive_surplus_worlds += (observation.summer_surplus_gain_per_member > 0.0) as usize;
+        construction_worlds += (observation.summer_construction_work > 0.0) as usize;
+        reserve_worlds += (observation.winter_reserve_released > 0.0) as usize;
+    }
+    let inv = 1.0 / n_worlds as f32;
+    report.mean_winter_clan_survival *= inv;
+    report.mean_winter_neutral_survival *= inv;
+    report.mean_winter_fairness_delta *= inv;
+    report.mean_summer_security *= inv;
+    report.mean_winter_security *= inv;
+    report.summer_surplus_gain_per_member *= inv;
+    report.summer_positive_surplus_world_fraction = positive_surplus_worlds as f32 * inv;
+    report.summer_construction_work *= inv;
+    report.summer_completed_buildings *= inv;
+    report.summer_construction_world_fraction = construction_worlds as f32 * inv;
+    report.winter_reserve_released *= inv;
+    report.winter_reserve_world_fraction = reserve_worlds as f32 * inv;
+    report.winter_food_change_per_member *= inv;
+    report.winter_task_coverage *= inv;
+    report.summer_birth_ratio *= inv;
+    report.winter_birth_ratio *= inv;
+    report.measured_cycle_birth_ratio *= inv;
+    report
+}
+
+#[cfg(test)]
+fn run_seasonal_benchmark_world(
+    brain: &Brain,
+    spec: &WorldSpec,
+    cycle_ticks: i32,
+    seed: u64,
+) -> SeasonalWorldObservation {
+    let mut world = World::new(spec.world_size, seed);
+    world.params = spec.params.clone();
+    world.populate(spec.neutrals, spec.trees, 0);
+    let clan_ids = [
+        world.seed_clan(brain.clone()),
+        world.seed_clan(brain.clone()),
+    ];
+
+    let initial_clan_ids: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| clan_ids.contains(&entity.clan))
+        .map(|entity| entity.id)
+        .collect();
+    let initial_neutral_ids: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.clan < 0)
+        .map(|entity| entity.id)
+        .collect();
+
+    let quarter = cycle_ticks / 4;
+    let measured_cycle_start_tick = cycle_ticks;
+    let summer_start_tick = cycle_ticks + quarter;
+    let summer_end_tick = cycle_ticks + quarter * 2;
+    let winter_start_tick = cycle_ticks + quarter * 3;
+    let measured_cycle_end_tick = cycle_ticks * 2;
+
+    // World::step increments tick before applying that tick's rules. Snapshots
+    // therefore sit one tick before each phase edge, so each delta contains
+    // exactly the named quarter and no boundary tick from its neighbor.
+    run_world_until(&mut world, measured_cycle_start_tick - 1);
+    let cycle_start = seasonal_snapshot(&world, &clan_ids);
+    run_world_until(&mut world, summer_start_tick - 1);
+    debug_assert_eq!(world.season_phase(), SeasonPhase::Spring);
+    let summer_start = seasonal_snapshot(&world, &clan_ids);
+    let summer_security = run_season_with_security(&mut world, &clan_ids, summer_end_tick - 1);
+    debug_assert_eq!(world.season_phase(), SeasonPhase::Summer);
+    let summer_end = seasonal_snapshot(&world, &clan_ids);
+    run_world_until(&mut world, winter_start_tick - 1);
+    debug_assert_eq!(world.season_phase(), SeasonPhase::Autumn);
+    let winter_start = seasonal_snapshot(&world, &clan_ids);
+
+    let winter_clan_cohort = active_subset(&world, &initial_clan_ids);
+    let winter_neutral_cohort = active_subset(&world, &initial_neutral_ids);
+    let winter_security =
+        run_season_with_security(&mut world, &clan_ids, measured_cycle_end_tick - 1);
+    debug_assert_eq!(world.season_phase(), SeasonPhase::Winter);
+    let winter_end = seasonal_snapshot(&world, &clan_ids);
+    let alive: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.is_active())
+        .map(|entity| entity.id)
+        .collect();
+    let winter_clan_survival = cohort_survival(&winter_clan_cohort, &alive, 0.0);
+    let winter_neutral_survival = cohort_survival(&winter_neutral_cohort, &alive, 1.0);
+    SeasonalWorldObservation {
+        winter_clan_survival,
+        winter_neutral_survival,
+        winter_fairness_delta: winter_clan_survival - winter_neutral_survival,
+        summer_security,
+        winter_security,
+        summer_surplus_gain_per_member: (summer_end.stored_food - summer_start.stored_food) as f32
+            / summer_start.active_clan_members.max(1) as f32,
+        summer_construction_work: summer_end
+            .construction_work
+            .saturating_sub(summer_start.construction_work)
+            as f32,
+        summer_completed_buildings: summer_end
+            .completed_buildings
+            .saturating_sub(summer_start.completed_buildings)
+            as f32,
+        winter_reserve_released: winter_end
+            .reserve_released
+            .saturating_sub(winter_start.reserve_released) as f32,
+        winter_food_change_per_member: (winter_end.stored_food - winter_start.stored_food) as f32
+            / winter_start.active_clan_members.max(1) as f32,
+        winter_task_coverage: seasonal_task_coverage(winter_start, winter_end),
+        summer_birth_ratio: summer_end.births.saturating_sub(summer_start.births) as f32
+            / summer_start.total_population.max(1) as f32,
+        winter_birth_ratio: winter_end.births.saturating_sub(winter_start.births) as f32
+            / winter_start.total_population.max(1) as f32,
+        measured_cycle_birth_ratio: winter_end.births.saturating_sub(cycle_start.births) as f32
+            / cycle_start.total_population.max(1) as f32,
+    }
+}
+
+#[cfg(test)]
+fn run_season_with_security(world: &mut World, clan_ids: &[i32], end_tick: i32) -> f32 {
+    let mut member_ticks = 0u64;
+    let mut hunger_sum = 0.0f32;
+    let mut starving_ticks = 0u64;
+    while world.tick < end_tick {
+        world.step();
+        let starve_ticks = world.params.starve_ticks.max(1);
+        for entity in world
+            .entities
+            .iter()
+            .filter(|entity| clan_ids.contains(&entity.clan) && entity.is_active())
+        {
+            let hunger = entity.hunger(starve_ticks).clamp(0.0, 1.0);
+            member_ticks += 1;
+            hunger_sum += hunger;
+            starving_ticks += (hunger >= 1.0) as u64;
+        }
+    }
+    let avg_hunger = hunger_sum / member_ticks.max(1) as f32;
+    let starving_fraction = starving_ticks as f32 / member_ticks.max(1) as f32;
+    ((1.0 - avg_hunger) * (1.0 - starving_fraction)).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
+fn run_world_until(world: &mut World, tick: i32) {
+    while world.tick < tick {
+        world.step();
+    }
+}
+
+#[cfg(test)]
+fn seasonal_snapshot(world: &World, clan_ids: &[i32]) -> SeasonalSnapshot {
+    let active_clan_members = world
+        .entities
+        .iter()
+        .filter(|entity| clan_ids.contains(&entity.clan) && entity.is_active())
+        .count();
+    let total_population = world
+        .entities
+        .iter()
+        .filter(|entity| entity.is_active())
+        .count();
+    let mut snapshot = SeasonalSnapshot {
+        active_clan_members,
+        total_population,
+        births: world.births,
+        ..SeasonalSnapshot::default()
+    };
+    for clan in world
+        .clans
+        .iter()
+        .filter(|clan| clan_ids.contains(&clan.id) && !clan.disbanded)
+    {
+        snapshot.stored_food += clan.food.max(0) + clan.reserve_food.max(0);
+        snapshot.reserve_released = snapshot
+            .reserve_released
+            .saturating_add(clan.stats.reserve_released);
+        for role in 0..N_MODES {
+            snapshot.role_ticks[role] =
+                snapshot.role_ticks[role].saturating_add(clan.stats.role_tick_sum[role]);
+        }
+    }
+    for settlement in world
+        .settlements
+        .iter()
+        .filter(|settlement| clan_ids.contains(&settlement.clan_id))
+    {
+        snapshot.construction_work = snapshot
+            .construction_work
+            .saturating_add(settlement.stats.construction_work);
+        snapshot.completed_buildings = snapshot
+            .completed_buildings
+            .saturating_add(settlement.stats.buildings_completed);
+    }
+    snapshot
+}
+
+#[cfg(test)]
+fn active_subset(world: &World, cohort: &HashSet<u32>) -> HashSet<u32> {
+    world
+        .entities
+        .iter()
+        .filter(|entity| entity.is_active() && cohort.contains(&entity.id))
+        .map(|entity| entity.id)
+        .collect()
+}
+
+#[cfg(test)]
+fn cohort_survival(cohort: &HashSet<u32>, alive: &HashSet<u32>, empty: f32) -> f32 {
+    if cohort.is_empty() {
+        return empty;
+    }
+    cohort.iter().filter(|id| alive.contains(id)).count() as f32 / cohort.len() as f32
+}
+
+#[cfg(test)]
+fn seasonal_task_coverage(start: SeasonalSnapshot, end: SeasonalSnapshot) -> f32 {
+    let role_ticks: [u64; N_MODES] =
+        std::array::from_fn(|role| end.role_ticks[role].saturating_sub(start.role_ticks[role]));
+    let total = role_ticks.iter().sum::<u64>() as f32;
+    if total <= 0.0 {
+        return 0.0;
+    }
+    let mut entropy = 0.0;
+    let mut meaningful = 0usize;
+    for ticks in role_ticks {
+        let share = ticks as f32 / total;
+        meaningful += (share >= 0.03) as usize;
+        if share > 0.0 {
+            entropy -= share * share.ln();
+        }
+    }
+    let breadth = meaningful as f32 / N_MODES as f32;
+    let entropy = (entropy / (N_MODES as f32).ln().max(1e-6)).clamp(0.0, 1.0);
+    let gather_present = role_ticks[ClanMode::Gather.index()] > 0;
+    let defend_present = role_ticks[ClanMode::Defend.index()] > 0;
+    let safety_core = (gather_present as u8 as f32 + defend_present as u8 as f32) * 0.5;
+    (breadth * 0.45 + entropy * 0.35 + safety_core * 0.20).clamp(0.0, 1.0)
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct LogisticsBenchmarkObservation {
     quality: QualityScore,
@@ -3218,6 +3588,33 @@ mod tests {
             a.routing_entropy >= 0.10,
             "routing collapse regressed: {a:#?}"
         );
+    }
+
+    #[test]
+    fn seasonal_reality_benchmark_is_deterministic() {
+        let brain = Brain::load(CHAMPION_PATH).expect("tracked champion.bin should load");
+        let base = Params::default();
+        let a = benchmark_seasonal_quality(&brain, &base, MAX_STAGE, 13, 0x05EA_50A1);
+        let b = benchmark_seasonal_quality(&brain, &base, MAX_STAGE, 13, 0x05EA_50A1);
+        println!("Seasonal Reality V1 benchmark: {a:#?}");
+        assert_eq!(a, b);
+        assert!(a.mean_winter_clan_survival >= 0.95, "{a:#?}");
+        assert!(a.robust_winter_clan_survival >= 0.95, "{a:#?}");
+        assert!(a.mean_winter_fairness_delta >= 0.0, "{a:#?}");
+        assert!(a.worst_winter_fairness_delta >= FAIRNESS_FLOOR, "{a:#?}");
+        assert!(a.mean_winter_security >= 0.80, "{a:#?}");
+        assert!(
+            a.mean_summer_security > a.mean_winter_security,
+            "winter must be materially harsher than summer: {a:#?}"
+        );
+        assert!(a.winter_task_coverage >= 0.55, "{a:#?}");
+        assert!(a.summer_birth_ratio >= 0.01, "{a:#?}");
+        assert!(a.winter_birth_ratio <= 0.02, "{a:#?}");
+        assert!(
+            a.winter_birth_ratio <= a.summer_birth_ratio * 0.50 + f32::EPSILON,
+            "{a:#?}"
+        );
+        assert!(a.measured_cycle_birth_ratio <= 0.10, "{a:#?}");
     }
 
     #[test]
