@@ -5,7 +5,7 @@ use crate::clan::ClanMode;
 
 /// What the NPC is currently trying to do — surfaced in the inspector so you
 /// can read each NPC's "idea" at a glance.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Goal {
     Wander,
     SeekFood,
@@ -50,6 +50,7 @@ impl Goal {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Entity {
     pub id: u32,
     pub x: i32,

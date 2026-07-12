@@ -19,6 +19,7 @@ pub mod terrain {
 
 pub const NO_OWNER: i32 = -1;
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Grid {
     pub size: i32,
     /// Terrain class per tile (see `terrain`).

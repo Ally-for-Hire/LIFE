@@ -72,6 +72,9 @@ cargo run --release        # first release build takes a few minutes, then it's 
   temporary trade pacts and allied passage. Gather couriers physically deliver
   only need-directed food/wood above survival floors, repeated delivery builds trust, and
   Defend workers respond to threats near active stockpile routes.
+- **Full-world save/load:** the Controls panel writes `world.lifeworld` through a
+  versioned, checksummed, atomic format and restores exact RNG, brains, economy,
+  care, courier, and diplomacy state for byte-identical continuation.
 - **Combat**, **food-gated reproduction**, **food memory**, and **one NPC per
   tile**.
 - Game-like **toggleable panels**, an **NPC inspector** (its current "idea"),
@@ -83,7 +86,7 @@ cargo run --release        # first release build takes a few minutes, then it's 
 - **Top bar:** Run/Pause, Step, the `ticks/s` slider, live stats, and panel
   toggles (Controls / Inspector / Graphs / Training).
 - **Viewport:** drag to pan, scroll to zoom, click an NPC to inspect it.
-- **Controls panel:** presets, populate counts, and every tunable world
+- **Controls panel:** save/load a complete world, presets, populate counts, and every tunable world
   parameter (food/trees, hunger/health, movement/perception, clans/combat,
   growth/expansion, Community Logistics/Care/Trade ablations, terrain).
 - **Training window:** start/stop evolution, edit the training config, watch the
@@ -100,6 +103,7 @@ cargo test --release tracked_champion_logistics_preserves_survival_gates -- --no
 cargo test --release champion_promotion -- --nocapture
 cargo test --release tracked_champion_care_preserves_survival_gates -- --nocapture
 cargo test --release tracked_champion_trade_preserves_survival_gates -- --nocapture
+cargo test --release world::persistence::tests -- --nocapture
 ```
 
 The V1.1 tests run paired logistics-on/off worlds with the same brain, seeds, and
@@ -129,6 +133,8 @@ currently improves rather than spends that margin.
 
 `life-rs/champion.bin` is the tracked deployable model. Marathon logs, stage/gen
 snapshots, backup champions, and `target/` are generated locally and git-ignored.
+`world.lifeworld` is the separate full simulation snapshot; loading pauses the
+world and detaches trainer-champion auto-sync until the user re-enables it.
 
 ## Documentation
 

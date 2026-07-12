@@ -26,6 +26,8 @@ shape the layout like a game HUD.
 - **Presets:** Gentle (default) · Balanced · Buffet · Famine — one click rebuilds
   the whole economy.
 - **Simulation:** run/step, the speed slider.
+- **World file:** save/load `world.lifeworld`, see success/failure status, and
+  explicitly control whether newly formed clans resume inheriting the trainer champion.
 - **Populate:** world size, NPC count, trees, starting clans, and a "maintain"
   population floor → **Populate fresh**.
 - **World Parameters** (collapsible groups, all live): Food/trees, Hunger/health,

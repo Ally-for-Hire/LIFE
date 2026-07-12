@@ -65,7 +65,7 @@ fn mix(x: &[f32], y: &[f32], rng: &mut Rng) -> Vec<f32> {
 }
 
 /// One expert: N_IN → N_HID (tanh) → N_OUT (sigmoid).
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct SubMind {
     w_ih: Vec<f32>,
     b_h: Vec<f32>,
@@ -122,7 +122,7 @@ impl SubMind {
 
 /// The master controller: N_IN → N_GATE_HID (tanh) → N_EXPERTS, softmaxed into
 /// routing weights over the sub-minds.
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 struct Gate {
     w_ih: Vec<f32>,
     b_h: Vec<f32>,
@@ -195,7 +195,7 @@ impl Gate {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Brain {
     experts: Vec<SubMind>,
     gate: Gate,
@@ -214,6 +214,37 @@ impl Brain {
             last_out: [0.0; N_OUT],
             last_gate: [1.0 / N_EXPERTS as f32; N_EXPERTS],
         }
+    }
+
+    pub(crate) fn has_valid_persistent_state(&self) -> bool {
+        self.experts.len() == N_EXPERTS
+            && self.experts.iter().all(|expert| {
+                expert.w_ih.len() == N_HID * N_IN
+                    && expert.b_h.len() == N_HID
+                    && expert.w_ho.len() == N_OUT * N_HID
+                    && expert.b_o.len() == N_OUT
+                    && expert
+                        .w_ih
+                        .iter()
+                        .chain(&expert.b_h)
+                        .chain(&expert.w_ho)
+                        .chain(&expert.b_o)
+                        .all(|value| value.is_finite())
+            })
+            && self.gate.w_ih.len() == N_GATE_HID * N_IN
+            && self.gate.b_h.len() == N_GATE_HID
+            && self.gate.w_ho.len() == N_EXPERTS * N_GATE_HID
+            && self.gate.b_o.len() == N_EXPERTS
+            && self
+                .gate
+                .w_ih
+                .iter()
+                .chain(&self.gate.b_h)
+                .chain(&self.gate.w_ho)
+                .chain(&self.gate.b_o)
+                .chain(&self.last_out)
+                .chain(&self.last_gate)
+                .all(|value| value.is_finite())
     }
 
     /// Evaluate the master + sub-minds: returns the gate-weighted action vector

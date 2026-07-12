@@ -47,6 +47,8 @@ world) finds the strategies. See [prior-art.md](prior-art.md) and
   clanmates before bleed-out; a live ablation restores immediate combat death.
 - **Trade/diplomacy:** surplus food/wood travels by physical courier, delivery
   builds symmetric trust, and temporary partners gain non-aggression and passage.
+- **World persistence:** `world.lifeworld` is versioned, checksummed, validated,
+  atomically replaced, and resumes the exact saved deterministic trajectory.
 - **Death only from scarcity or combat:** NPCs remember food and home to it, so
   they never wander off and starve for no reason.
 - **Build/run:** `cd life-rs && cargo run --release`.

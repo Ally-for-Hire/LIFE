@@ -144,7 +144,22 @@ Edited live in the Training window.
 | `mutation_rate` / `mutation_strength` | 0.10 / 0.35 | per-weight mutation |
 | `elite` | 6 | top brains carried over unchanged, alongside niche elites |
 
-Champion brains are serialized to `life-rs/champion.bin`; the app loads that file
-at startup. Stage/generation snapshots and marathon logs are generated artifacts.
-Full-world save/load is not implemented yet; a `(seed, params)` pair reproduces a
-run exactly in the meantime.
+## Persistence files
+
+Champion brains remain independently serialized as `life-rs/champion.bin` in the
+`LFB1` format. Stage/generation snapshots and marathon logs are generated artifacts.
+
+The Controls panel saves the complete live simulation to `world.lifeworld`. The
+`LIFEWRLD` V1 envelope contains an explicit version, fixed payload length, CRC32,
+and a fixed-integer little-endian payload capped at 512 MiB. Saving validates the
+live state, writes a temporary file, flushes it, and atomically replaces the target
+(with write-through replacement on Windows).
+
+V1 preserves grid layers, entities/trees/clans in update order, every parameter and
+counter, exact xoshiro256** state, brains including inspector routing state, care
+links, courier/return state, diplomacy memory, cached clan decisions, and the live
+champion. Only the reusable flood-fill and occupancy buffers are omitted; the next
+tick rebuilds them. Loading validates checksums, sizes, floats, coordinates, IDs,
+rosters, references, brain dimensions, RNG, and diplomacy before returning a new
+world. The UI installs it transactionally, pauses it, clears stale view/history
+state, and disables trainer-champion auto-sync until explicitly re-enabled.

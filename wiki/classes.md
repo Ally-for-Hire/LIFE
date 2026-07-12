@@ -25,6 +25,7 @@ The single source of truth and the per-tick simulation.
 | `populate(neutrals, trees, clans)` | generate terrain and seed the world |
 | `setup_arena(brains, trees, neutrals)` | headless training arena setup |
 | `seed_clan(brain)` | drop a champion into the live world |
+| `save_file(path)` / `load_file(path)` | atomically persist or validate/restore the complete deterministic world |
 
 Internally: `grow_farms` (per-tick farm growback on owned land), `breed_brain`
 (in-vivo evolution for new villages), `form_refugee_clan`, `find_frontier`

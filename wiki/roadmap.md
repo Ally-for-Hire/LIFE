@@ -54,11 +54,11 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
 - **Trade/Diplomacy V1** — stable symmetric relationship memory, temporary pacts,
   survival-buffered physical food/wood delivery, allied passage, route defense,
   causal counters, and a paired no-trade benchmark.
+- **Full-world save/load V1** — versioned/checksummed atomic snapshots, exact RNG
+  continuation, state/reference validation, UI controls, and trainer-sync isolation.
 
 ## Next (civ layers)
 
-- **Save / load** — persist and validate a complete deterministic world. Champion
-  brain persistence already exists separately.
 - **Buildings + tech tree** — houses, granaries, walls, barracks, markets with
   footprints, HP, and production; reuse fixed policy roles/inputs so `LFB1` remains valid.
 - **Weapons / military** — equipment from resources + tech that boosts

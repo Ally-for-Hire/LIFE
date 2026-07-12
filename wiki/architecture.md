@@ -11,6 +11,7 @@ no JSON snapshot or HTTP layer like the old JS prototype had.
 | `main.rs` | Entry point; sets up the eframe/egui native window. |
 | `app.rs` | The egui application: rendering, panels, knobs, graphs, the training window, and the variable-rate sim driver. |
 | `world.rs` | `World` + `Params`: the grid, entities, trees, clans, the per-tick `step`, and all gameplay rules. |
+| `world/persistence.rs` | `LIFEWRLD` V1 full-world DTO, validation, checksum envelope, atomic replacement, and deterministic continuation tests. |
 | `entity.rs` | `Entity` (one NPC) and its `Goal` (the "idea" shown in the inspector). |
 | `clan.rs` | `Clan`, `ClanMode`, clan stats, and the clan color helper. |
 | `diplomacy.rs` | Deterministic sorted relationship ledger: trust, temporary pacts, delivered volume, and decay/pruning. |
@@ -89,6 +90,9 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
   and causal logistics-value retention. Only a passing challenger is serialized.
 - Every `World` owns its own `Rng`; there is **no global RNG**. Same seed →
   identical run (covered by a test).
+- Full-world persistence stores every behavior-affecting field in vector order,
+  including exact xoshiro state and cached decisions. Only `reach` and `occupied`
+  scratch buffers are omitted and rebuilt; V1 loads reject corruption before replacement.
 - `community_logistics=false` is a deterministic infrastructure ablation. Wood
   regrowth still consumes the same per-forest RNG draws but does not mutate the
   layer, preventing avoidable RNG drift from the regrowth branch. Later divergence

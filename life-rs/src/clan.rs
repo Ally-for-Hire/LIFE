@@ -6,7 +6,7 @@
 
 use crate::brain::{Brain, N_MODES};
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum ClanMode {
     Gather,
     Recruit,
@@ -49,7 +49,7 @@ impl ClanMode {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct ClanStats {
     pub kills: u32,
     pub losses: u32,
@@ -88,6 +88,7 @@ pub struct ClanStats {
     pub role_tick_sum: [u64; N_MODES],
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Clan {
     pub id: i32,
     pub leader_id: u32,

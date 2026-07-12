@@ -4,6 +4,7 @@
 //! training, which silently broke whenever new code reached for randomness.
 //! Here every world owns its own `Rng`, so determinism is explicit and local.
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Rng {
     s: [u64; 4],
 }
@@ -22,6 +23,10 @@ impl Rng {
         Rng {
             s: [next(), next(), next(), next()],
         }
+    }
+
+    pub(crate) fn has_valid_state(&self) -> bool {
+        self.s.iter().any(|&word| word != 0)
     }
 
     #[inline]

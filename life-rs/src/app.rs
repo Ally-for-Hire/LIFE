@@ -15,6 +15,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+const WORLD_SAVE_PATH: &str = "world.lifeworld";
+
 /// One-click economy scenarios. The default is survival-first growth:
 /// clans should stabilize, recruit, and expand before scarcity or war matters.
 #[derive(Clone, Copy, PartialEq)]
@@ -118,6 +120,8 @@ pub struct LifeApp {
     trainer: Arc<Mutex<Trainer>>,
     train_running: Arc<AtomicBool>,
     train_stop: Arc<AtomicBool>,
+    follow_trainer_champion: bool,
+    world_io_status: Option<String>,
 
     // graphs + metering
     hist: History,
@@ -172,6 +176,8 @@ impl LifeApp {
             trainer,
             train_running,
             train_stop,
+            follow_trainer_champion: true,
+            world_io_status: None,
             hist: History::new(),
             last_sample_tick: 0,
             last_time: 0.0,
@@ -280,6 +286,7 @@ impl LifeApp {
         self.last_deaths = 0;
         self.tex = None;
         self.tick_accum = 0.0;
+        self.follow_trainer_champion = true;
     }
 
     fn repopulate(&mut self) {
@@ -295,6 +302,28 @@ impl LifeApp {
         self.last_sample_tick = 0;
         self.tex = None; // grid dims may have changed
         self.tick_accum = 0.0;
+        self.follow_trainer_champion = true;
+    }
+
+    fn install_loaded_world(&mut self, world: World) {
+        self.world = world;
+        self.running = false;
+        self.p_size = self.world.grid.size;
+        self.p_entities = self.world.population() as i32;
+        self.p_trees = self.world.trees.len() as i32;
+        self.p_clans = self.world.maintain_clans;
+        self.maintain_on = self.world.maintain_pop > 0;
+        self.p_maintain = self.world.maintain_pop.max(0);
+        self.selected = None;
+        self.hist.clear();
+        self.last_sample_tick = self.world.tick;
+        self.last_tick = self.world.tick;
+        self.last_deaths = self.world.deaths_starved;
+        self.measured_tps = 0.0;
+        self.deaths_rate = 0.0;
+        self.tex = None;
+        self.tick_accum = 0.0;
+        self.follow_trainer_champion = false;
     }
 
     /// Paint the whole world into a pixel buffer (one cell = one pixel),
@@ -445,9 +474,11 @@ impl eframe::App for LifeApp {
             self.last_deaths = self.world.deaths_starved;
             // Keep the live world's champion in sync with the background trainer
             // so newly-formed villages can inherit evolved strategies automatically.
-            if let Ok(t) = self.trainer.try_lock() {
-                if t.best_brain.is_some() {
-                    self.world.champion = t.best_brain.clone();
+            if self.follow_trainer_champion {
+                if let Ok(t) = self.trainer.try_lock() {
+                    if t.best_brain.is_some() {
+                        self.world.champion = t.best_brain.clone();
+                    }
                 }
             }
         }
@@ -554,6 +585,42 @@ impl eframe::App for LifeApp {
                                 .logarithmic(true)
                                 .text("ticks/s"),
                         );
+
+                        ui.separator();
+                        ui.label(egui::RichText::new("WORLD FILE").small().weak());
+                        ui.horizontal(|ui| {
+                            if ui.button("Save world").clicked() {
+                                self.world_io_status = Some(match self.world.save_file(WORLD_SAVE_PATH) {
+                                    Ok(()) => format!("saved {WORLD_SAVE_PATH}"),
+                                    Err(error) => format!("save failed: {error}"),
+                                });
+                            }
+                            if ui.button("Load world").clicked() {
+                                match World::load_file(WORLD_SAVE_PATH) {
+                                    Ok(world) => {
+                                        self.install_loaded_world(world);
+                                        self.world_io_status = Some(format!(
+                                            "loaded {WORLD_SAVE_PATH}; paused at tick {}",
+                                            self.world.tick
+                                        ));
+                                    }
+                                    Err(error) => {
+                                        self.world_io_status = Some(format!("load failed: {error}"));
+                                    }
+                                }
+                            }
+                        });
+                        ui.label(egui::RichText::new(WORLD_SAVE_PATH).small().weak());
+                        ui.checkbox(
+                            &mut self.follow_trainer_champion,
+                            "new clans inherit trainer champion",
+                        )
+                        .on_hover_text(
+                            "Disabled after loading so background training cannot mutate saved world behavior",
+                        );
+                        if let Some(status) = &self.world_io_status {
+                            ui.label(egui::RichText::new(status).small());
+                        }
 
                         ui.separator();
                         ui.label(egui::RichText::new("POPULATE").small().weak());

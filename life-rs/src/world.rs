@@ -19,6 +19,8 @@ use crate::grid::{terrain, Grid, NO_OWNER};
 use crate::rng::Rng;
 use std::collections::HashMap;
 
+mod persistence;
+
 // Default values (also slider starting points).
 pub const D_STARVE_TICKS: i32 = 1400;
 pub const D_STARVE_DAMAGE: f32 = 0.05;
@@ -92,7 +94,7 @@ const TRADE_WOOD_LOAD: i32 = 1;
 /// a clan's crops feed only its own people (despotic exclusion).
 const EMERGENCY_STEAL: f32 = 0.9;
 
-#[derive(Clone)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Params {
     // food / trees
     pub tree_interval: i32,
@@ -192,6 +194,7 @@ impl Default for Params {
     }
 }
 
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Tree {
     pub x: i32,
     pub y: i32,

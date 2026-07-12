@@ -8,7 +8,7 @@
 pub type ClanId = i32;
 pub type Tick = i32;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Relationship {
     /// Canonical pair key. `clan_low` is always less than `clan_high`.
     pub clan_low: ClanId,
@@ -45,7 +45,7 @@ impl Relationship {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiplomacyLedger {
     relationships: Vec<Relationship>,
 }

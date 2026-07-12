@@ -340,9 +340,26 @@ focused regression test or promotion gate. The final 13-world trade pair preserv
 and enabled worlds deliver 6.3 food plus 3.8 wood in 5.8 completed trips versus zero in the control.
 The release suite passes 52 tests with one ignored marathon.
 
+### A20 — Full-world persistence V1
+
+The app now saves and loads `world.lifeworld` from Controls. The versioned
+`LIFEWRLD` envelope uses a bounded fixed-endian payload, CRC32, validation before
+save/load, temporary-file flush, and atomic write-through replacement on Windows.
+It preserves vector order, exact xoshiro state, brain routing state, terrain and
+economy layers, care links, active outbound/returning couriers, diplomacy, cached
+clan decisions, and the live champion; only flood-fill/occupancy scratch is rebuilt.
+
+Loading is transactional and pauses the simulation. UI population/maintain knobs,
+selection, texture, graphs, and meters are reset to the loaded checkpoint, while
+background training remains independent. Trainer-to-world champion sync is disabled
+after load so it cannot silently change future village inheritance. Eight focused
+tests cover canonical roundtrip, 1,000-tick deterministic continuation, active care/
+trade continuation, scratch exclusion, corruption/version rejection, stale-cache/
+parameter validation, and Windows overwrite behavior. The integrated release suite
+passes 60 tests with one ignored marathon.
+
 ## Open ideas / next
 
-- **Full-world save/load:** versioned, validated persistence with exact RNG continuation.
 - **Buildings, technology, and equipment:** resource-backed settlement progression
   that preserves the fixed champion brain contract.
 - **More sub-minds / deeper hierarchy:** specialist nets for diplomacy, logistics;
