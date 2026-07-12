@@ -258,6 +258,31 @@ food security **0.93**, clan/neutral cohort survival **1.00 / 0.995**, logistics
 ended with population **288**, five surviving clans, **zero starvation**, 23 kills,
 and 1,274 roads built across the five communities.
 
+### A16 — Logistics Validation V1.1
+
+V1 showed that communities delivered wood, built roads, and used reserves, but
+those activity counters could not prove that infrastructure improved transport or
+survival. V1.1 adds `community_logistics` as a live deterministic treatment/
+ablation switch. The disabled arm keeps sticky simultaneous roles and ordinary
+food hauling, but disables reserve use, wood jobs, road construction, and every
+movement/pathing benefit from existing roads. Retained roads render gray.
+
+The two arms consume matching forest-regrowth random draws so later simulation
+randomness stays aligned. New counters record food delivered, actual member-steps
+on active roads, and movement cost saved; quality/training surface normalized
+hauling throughput and road utility separately from the compatibility logistics
+composite. The UI exposes the switch and causal counters directly.
+
+The first 13-world, all-stage paired benchmark passes the survival-first gate.
+Enabled/disabled initial-clan survival is **1.000 / 1.000**; food security is
+**0.928 / 0.935** (a 0.7-point cost, inside the strict 1-point tolerance), while
+clan-vs-neutral fairness improves to **+0.009 / +0.002**. Useful transport is now
+measurable: hauling throughput is **0.438 / 0.372**, road utility **0.290 / 0**,
+reserve use **0.262 / 0**, and reserve security **0.612 / 0**. Survival-first
+tuning now withholds wood labor until both the ordinary working-food floor and
+the emergency reserve are full. In-vivo selection uses food delivery and actual
+road steps rather than rewarding raw road construction.
+
 ## Open ideas / next
 
 - **Diplomacy / trade:** friendly clans exchange food; relationship memory; a

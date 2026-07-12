@@ -93,6 +93,34 @@ survival-first contract.
   wood per member, and local wood availability. The network dimensions and saved
   `champion.bin` format do not change.
 
+### Logistics Validation V1.1
+
+V1 proves that logistics activity occurs; V1.1 measures whether it is useful.
+`Params::community_logistics` is a live treatment/ablation switch. Turning it off
+disables protected reserve deposits/releases, wood jobs, road construction, and
+road movement-cost reductions. Delivered food goes to the ordinary stockpile.
+Existing road cells remain visible in gray so the map can be compared without
+hiding prior infrastructure. Sticky simultaneous assignments remain active, so
+the comparison isolates infrastructure rather than changing the leader policy.
+Wood regrowth consumes matching random draws in both arms but changes the wood
+layer only when enabled, removing avoidable regrowth-branch RNG drift; later
+behavioral divergence is part of the treatment effect.
+
+Wood labor is survival-gated: Gather workers do not leave food work until the
+ordinary stockpile floor and protected reserve are both full.
+
+Each clan now records causal evidence alongside activity:
+
+- `food_delivered` measures actual hauling throughput rather than stored-food
+  snapshots;
+- `road_steps` measures member movement that truly used roads;
+- `road_cost_saved_milli` accumulates the movement cost avoided by those steps.
+
+Training reports normalized hauling throughput and road utility separately from
+the compatibility `logistics` composite. Paired deterministic benchmarks can
+therefore compare the same brain, seeds, and worlds with logistics enabled and
+disabled instead of treating road construction count as proof of benefit.
+
 If a leader dies a follower is promoted; a clan disbands only when no members
 remain (its territory is then freed). To keep the world a living patchwork,
 `maintain_clans` re-forms villages from masterless **refugees** when war thins the

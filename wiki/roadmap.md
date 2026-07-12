@@ -41,6 +41,10 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
   village gather, expand, defend, recruit, attack, and scout simultaneously;
   renewable forest wood feeds shared stockpiles, travelled owned routes become
   wood-built roads, and emergency food reserves protect clans through shocks.
+- **Logistics Validation V1.1 instrumentation** — a live deterministic
+  infrastructure ablation, no-road-benefit control semantics, food-delivery
+  throughput, real road member-steps, and measured movement-cost savings replace
+  road-building activity as the evidence needed for causal comparison.
 
 ## Next (civ layers)
 

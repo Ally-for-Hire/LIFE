@@ -343,7 +343,11 @@ impl LifeApp {
                 );
             }
             if g.road[i] > 0 {
-                px[i] = egui::Color32::from_rgb(184, 154, 102);
+                px[i] = if self.world.params.community_logistics {
+                    egui::Color32::from_rgb(184, 154, 102)
+                } else {
+                    egui::Color32::from_rgb(104, 106, 110)
+                };
             }
         }
         // pellets
@@ -616,7 +620,19 @@ impl eframe::App for LifeApp {
                             egui::Color32::from_rgb(158, 104, 58),
                             "harvestable forest wood",
                         );
-                        legend_row(ui, egui::Color32::from_rgb(184, 154, 102), "community road");
+                        legend_row(
+                            ui,
+                            if self.world.params.community_logistics {
+                                egui::Color32::from_rgb(184, 154, 102)
+                            } else {
+                                egui::Color32::from_rgb(104, 106, 110)
+                            },
+                            if self.world.params.community_logistics {
+                                "community road"
+                            } else {
+                                "road (benefit disabled)"
+                            },
+                        );
                     });
                 });
         }
@@ -682,6 +698,11 @@ impl eframe::App for LifeApp {
                                 ui.label(format!("stockpile food: {}", c.food));
                                 ui.label(format!("emergency reserve: {} food", c.reserve_food));
                                 ui.label(format!("stockpile wood: {}", c.wood));
+                                ui.label(if self.world.params.community_logistics {
+                                    "logistics infrastructure: enabled"
+                                } else {
+                                    "logistics infrastructure: disabled (ablation)"
+                                });
                                 ui.label(format!("territory: {} tiles", c.territory));
                                 ui.label(format!("aggression: {:.2}", c.aggression));
                                 ui.label(format!(
@@ -704,8 +725,14 @@ impl eframe::App for LifeApp {
                                     }
                                 });
                                 ui.label(format!(
-                                    "public works: {} wood delivered / {} roads built",
-                                    c.stats.wood_delivered, c.stats.roads_built
+                                    "deliveries: {} food / {} wood",
+                                    c.stats.food_delivered, c.stats.wood_delivered
+                                ));
+                                ui.label(format!(
+                                    "roads: {} built / {} member-steps / {:.2} move cost saved",
+                                    c.stats.roads_built,
+                                    c.stats.road_steps,
+                                    c.stats.road_cost_saved_milli as f32 / 1000.0
                                 ));
                                 ui.label(format!(
                                     "reserve: {} deposited / {} released",
@@ -955,6 +982,12 @@ impl eframe::App for LifeApp {
                             ui.end_row();
                             ui.label("community logistics");
                             ui.label(format!("{:.0}%", t.mean_logistics * 100.0));
+                            ui.end_row();
+                            ui.label("hauling throughput");
+                            ui.label(format!("{:.0}%", t.mean_hauling_throughput * 100.0));
+                            ui.end_row();
+                            ui.label("road utility");
+                            ui.label(format!("{:.0}%", t.mean_road_utility * 100.0));
                             ui.end_row();
                             ui.label("reserve security");
                             ui.label(format!("{:.0}%", t.mean_reserve_security * 100.0));
@@ -1266,6 +1299,24 @@ fn params_ui(ui: &mut egui::Ui, p: &mut Params, tps: f32) {
                 egui::RichText::new(
                     "owned, fertile land grows food; lean seasons cut yields and spark wars",
                 )
+                .small()
+                .weak(),
+            );
+        });
+
+    egui::CollapsingHeader::new("Community logistics")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.checkbox(
+                &mut p.community_logistics,
+                "enable Community Logistics V1",
+            );
+            ui.label(
+                egui::RichText::new(if p.community_logistics {
+                    "wood hauling, reserves, road construction, and road movement savings are active"
+                } else {
+                    "causal ablation: reserve/wood/road mechanics are off and existing roads give no movement benefit; simultaneous roles remain active"
+                })
                 .small()
                 .weak(),
             );

@@ -118,6 +118,7 @@ pub struct Params {
     pub season_amp: f32,    // yield swing amplitude (0..1); 0 = no seasonal variation
     pub soil_depletion_rate: f32, // how fast harvesting exhausts a tile (0 = off)
     pub disaster_rate: f32, // chance/intensity of regional blights (0 = off)
+    pub community_logistics: bool, // shared reserves, wood labor, and roads
     // population growth
     pub birth_chance: f32,    // chance per pair of NPCs per reproduction check
     pub birth_interval: i32,  // ticks between reproduction checks
@@ -163,6 +164,7 @@ impl Default for Params {
             season_amp: D_SEASON_AMP,
             soil_depletion_rate: 0.0, // off by default; the curriculum ramps it in
             disaster_rate: 0.0,       // off by default; the curriculum ramps it in
+            community_logistics: true,
             birth_chance: D_BIRTH_CHANCE,
             birth_interval: D_BIRTH_INTERVAL,
             birth_food_cost: D_BIRTH_FOOD_COST,
@@ -417,7 +419,7 @@ impl World {
         }
         if self.clans[cidx].food > 0 {
             self.clans[cidx].food -= 1;
-        } else if self.clans[cidx].reserve_food > 0 {
+        } else if self.params.community_logistics && self.clans[cidx].reserve_food > 0 {
             self.clans[cidx].reserve_food -= 1;
             self.clans[cidx].stats.reserve_released += 1;
         } else {
@@ -432,6 +434,11 @@ impl World {
     /// first; only the surplus above that floor enters the protected reserve.
     fn deposit_food(&mut self, cidx: usize, amount: i32) {
         if amount <= 0 {
+            return;
+        }
+        self.clans[cidx].stats.food_delivered += amount as u32;
+        if !self.params.community_logistics {
+            self.clans[cidx].food += amount;
             return;
         }
         let pop = self.clan_roster_size(cidx);
@@ -642,9 +649,14 @@ impl World {
                 + c.fertile_capacity * 0.6
                 + c.territory as f32 * 0.05
                 + c.stats.kills as f32 * 0.5
-                + c.reserve_food.max(0) as f32 * 0.12
-                + c.stats.roads_built as f32 * 0.4
-                + c.stats.reserve_released as f32 * 0.15;
+                + if self.params.community_logistics {
+                    c.reserve_food.max(0) as f32 * 0.12
+                        + (c.stats.road_steps as f32).sqrt() * 0.12
+                        + (c.stats.food_delivered as f32).sqrt() * 0.08
+                        + c.stats.reserve_released as f32 * 0.15
+                } else {
+                    0.0
+                };
             pool.push((i, fit));
         }
         if pool.is_empty() {
@@ -1058,6 +1070,9 @@ impl World {
 
     /// Local public-good signals for the unchanged reserved brain inputs.
     fn logistics_signals(&self, clan_idx: usize) -> (f32, f32) {
+        if !self.params.community_logistics {
+            return (0.0, 0.0);
+        }
         let Some((sx, sy)) = self.clans[clan_idx].stockpile else {
             return (0.0, 0.0);
         };
@@ -1107,7 +1122,7 @@ impl World {
         }
         let i = self.grid.idx(x, y);
         let mut c = terrain_move_cost(self.grid.terrain[i]);
-        if self.grid.road[i] > 0 {
+        if self.params.community_logistics && self.grid.road[i] > 0 {
             c *= 0.5; // roads halve cost (built later; hook ready)
         }
         c
@@ -1148,6 +1163,13 @@ impl World {
         self.occupied[oi] = self.occupied[oi].saturating_sub(1);
         self.occupied[ni] += 1;
         self.grid.traffic[ni] = self.grid.traffic[ni].saturating_add(1);
+        if self.params.community_logistics && self.grid.road[ni] > 0 && e.clan >= 0 {
+            if let Some(cidx) = self.clan_index(e.clan) {
+                self.clans[cidx].stats.road_steps += 1;
+                self.clans[cidx].stats.road_cost_saved_milli +=
+                    road_cost_saved_milli(self.grid.terrain[ni]);
+            }
+        }
         e.move_budget -= c;
         e.x = nx;
         e.y = ny;
@@ -1288,8 +1310,12 @@ impl World {
             self.clans[i].stats.pop_tick_sum += p as u64;
             self.clans[i].stats.hunger_tick_sum += hunger_sum[i];
             self.clans[i].stats.starving_ticks += starving[i];
-            self.clans[i].stats.food_tick_sum +=
-                (self.clans[i].food.max(0) + self.clans[i].reserve_food.max(0)) as u64;
+            let reserve = if self.params.community_logistics {
+                self.clans[i].reserve_food.max(0)
+            } else {
+                0
+            };
+            self.clans[i].stats.food_tick_sum += (self.clans[i].food.max(0) + reserve) as u64;
             self.clans[i].stats.on_terr_tick_sum += on_terr[i] as u64;
             for role in 0..N_MODES {
                 self.clans[i].stats.role_tick_sum[role] += roles[i][role] as u64;
@@ -1666,7 +1692,12 @@ impl World {
 
             let decided = if decide {
                 let size = pop[idx] as f32;
-                let food = (self.clans[idx].food + self.clans[idx].reserve_food) as f32;
+                let reserve = if self.params.community_logistics {
+                    self.clans[idx].reserve_food
+                } else {
+                    0
+                };
+                let food = (self.clans[idx].food + reserve) as f32;
                 let terr = self.clans[idx].territory as f32;
                 let avg_hunger = if pop[idx] > 0 {
                     hunger_sum[idx] / pop[idx] as f32
@@ -1719,18 +1750,22 @@ impl World {
                     0.0,         // 17 buildings / settlement development level
                     0.0,         // 18 tech / research level
                     0.0,         // 19 military strength / equipment level
-                    (self.clans[idx].wood as f32 / (size * 3.0).max(1.0)).min(1.0), // 20 stored wood / head
+                    if self.params.community_logistics {
+                        (self.clans[idx].wood as f32 / (size * 3.0).max(1.0)).min(1.0)
+                    } else {
+                        0.0
+                    }, // 20 stored wood / head
                     available_wood, // 21 reachable forest wood
-                    0.0,            // 22 diplomacy: relation with nearest clan (0 enemy .. 1 ally)
-                    0.0,            // 23 number of allies / trade partners
-                    0.0,            // 24 active trade inflow / volume
-                    0.0,            // 25 day/night phase (distinct from season)
+                    0.0,         // 22 diplomacy: relation with nearest clan (0 enemy .. 1 ally)
+                    0.0,         // 23 number of allies / trade partners
+                    0.0,         // 24 active trade inflow / volume
+                    0.0,         // 25 day/night phase (distinct from season)
                     self.clans[idx].soil_depletion.min(1.0), // 26 soil depletion of owned tiles
                     self.disaster_level, // 27 active disaster/event severity
-                    0.0,            // 28 average member morale / health
-                    0.0,            // 29 water / coast / river access of territory
-                    0.0,            // 30 spare
-                    1.0,            // 31 bias
+                    0.0,         // 28 average member morale / health
+                    0.0,         // 29 water / coast / river access of territory
+                    0.0,         // 30 spare
+                    1.0,         // 31 bias
                 ];
 
                 // The master routes; the sub-minds propose. We take the blended
@@ -2050,7 +2085,9 @@ impl World {
                 self.consume_pellet_at(e, false);
                 return;
             }
-            if self.clans[cidx].food > 0 || self.clans[cidx].reserve_food > 0 {
+            let reserve_available =
+                self.params.community_logistics && self.clans[cidx].reserve_food > 0;
+            if self.clans[cidx].food > 0 || reserve_available {
                 if let Some((sx, sy)) = self.clans[cidx].stockpile {
                     let d = (e.x - sx).abs().max((e.y - sy).abs());
                     if !urgent || d <= self.params.vision_radius * 2 {
@@ -2148,14 +2185,18 @@ impl World {
     }
 
     fn should_gather_wood(&self, e: &Entity, cidx: usize) -> bool {
+        if !self.params.community_logistics {
+            return false;
+        }
         if e.wood > 0 {
             return true;
         }
         let pop = self.clan_roster_size(cidx);
         let food_safe = self.clans[cidx].food >= pop * STOCKPILE_FOOD_PER_MEMBER;
+        let reserve_ready = self.clans[cidx].reserve_food >= pop * RESERVE_FOOD_PER_MEMBER;
         let road_workers = self.clans[cidx].workforce[ClanMode::Expand.index()] as i32;
         let wood_target = ROAD_WOOD_COST * (road_workers.max(1) + 2);
-        food_safe && road_workers > 0 && self.clans[cidx].wood < wood_target
+        food_safe && reserve_ready && road_workers > 0 && self.clans[cidx].wood < wood_target
     }
 
     fn gather_wood(&mut self, e: &mut Entity, cidx: usize) {
@@ -2587,10 +2628,13 @@ impl World {
             return;
         }
         for i in 0..self.grid.wood.len() {
-            if self.grid.terrain[i] == terrain::FOREST
-                && self.grid.wood[i] < FOREST_WOOD_CAP
-                && self.rng.chance(WOOD_REGROW_CHANCE)
-            {
+            if self.grid.terrain[i] != terrain::FOREST {
+                continue;
+            }
+            // Always consume exactly one roll per forest tile so paired on/off
+            // worlds retain common random numbers despite different depletion.
+            let regrows = self.rng.chance(WOOD_REGROW_CHANCE);
+            if self.params.community_logistics && self.grid.wood[i] < FOREST_WOOD_CAP && regrows {
                 self.grid.wood[i] += 1;
             }
         }
@@ -2601,6 +2645,12 @@ impl World {
     /// responsive to recent hauling and reinforcement routes.
     fn build_roads(&mut self) {
         if self.tick % ROAD_BUILD_INTERVAL != 0 {
+            return;
+        }
+        if !self.params.community_logistics {
+            for traffic in self.grid.traffic.iter_mut() {
+                *traffic /= 2;
+            }
             return;
         }
         let mut clan_by_id = HashMap::new();
@@ -2828,6 +2878,17 @@ fn terrain_move_cost(t: u8) -> f32 {
     }
 }
 
+fn road_cost_saved_milli(t: u8) -> u64 {
+    match t {
+        terrain::MOUNTAIN => 1500,
+        terrain::HILL => 800,
+        terrain::SAND => 700,
+        terrain::FOREST => 625,
+        terrain::WATER => 0,
+        _ => 500,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2941,6 +3002,7 @@ mod tests {
     #[test]
     fn reserve_only_takes_surplus_and_releases_when_working_food_is_empty() {
         let mut w = World::new(50, 23);
+        assert!(Params::default().community_logistics);
         w.populate(0, 0, 1);
         let ci = 0;
         let floor = w.clan_roster_size(ci) * STOCKPILE_FOOD_PER_MEMBER;
@@ -2948,6 +3010,7 @@ mod tests {
         w.deposit_food(ci, 5);
         assert_eq!(w.clans[ci].food, floor);
         assert_eq!(w.clans[ci].reserve_food, 5);
+        assert_eq!(w.clans[ci].stats.food_delivered, 5);
 
         w.clans[ci].food = 0;
         w.clans[ci].reserve_food = 1;
@@ -2959,6 +3022,111 @@ mod tests {
         w.entities.insert(ei, leader);
         assert_eq!(w.clans[ci].reserve_food, 0);
         assert_eq!(w.clans[ci].stats.reserve_released, 1);
+    }
+
+    #[test]
+    fn logistics_off_keeps_food_delivery_but_disables_reserves_and_wood_work() {
+        let mut w = World::new(50, 29);
+        w.params.community_logistics = false;
+        w.populate(0, 0, 1);
+        let ci = 0;
+        let leader_id = w.clans[ci].leader_id;
+        let ei = w.entity_index(leader_id).unwrap();
+        let mut leader = w.entities.remove(ei);
+        (leader.x, leader.y) = w.clans[ci].stockpile.unwrap();
+
+        w.clans[ci].food = 0;
+        w.clans[ci].reserve_food = 2;
+        leader.wood = 1;
+        assert!(!w.eat_from_stockpile(&mut leader, ci));
+        assert_eq!(w.clans[ci].reserve_food, 2);
+        assert_eq!(w.clans[ci].stats.reserve_released, 0);
+        assert!(!w.should_gather_wood(&leader, ci));
+
+        w.deposit_food(ci, 5);
+        assert_eq!(w.clans[ci].food, 5);
+        assert_eq!(w.clans[ci].reserve_food, 2);
+        assert_eq!(w.clans[ci].stats.food_delivered, 5);
+        assert_eq!(w.clans[ci].stats.reserve_deposited, 0);
+    }
+
+    #[test]
+    fn wood_labor_waits_for_full_food_buffers() {
+        let mut w = World::new(50, 37);
+        w.populate(0, 0, 1);
+        let ci = 0;
+        let pop = w.clan_roster_size(ci);
+        w.clans[ci].workforce[ClanMode::Expand.index()] = 1;
+        w.clans[ci].wood = 0;
+        w.clans[ci].food = pop * STOCKPILE_FOOD_PER_MEMBER;
+        w.clans[ci].reserve_food = pop * RESERVE_FOOD_PER_MEMBER - 1;
+        let entity = w.entities.remove(0);
+
+        assert!(!w.should_gather_wood(&entity, ci));
+        w.clans[ci].reserve_food = pop * RESERVE_FOOD_PER_MEMBER;
+        assert!(w.should_gather_wood(&entity, ci));
+    }
+
+    #[test]
+    fn road_counters_measure_effective_clan_member_steps() {
+        let mut w = World::new(50, 47);
+        w.populate(0, 0, 1);
+        let ci = 0;
+        let leader_id = w.clans[ci].leader_id;
+        let ei = w.entity_index(leader_id).unwrap();
+        let mut leader = w.entities.remove(ei);
+        let source = (leader.x, leader.y);
+        let target = if leader.x + 1 < w.grid.size {
+            (leader.x + 1, leader.y)
+        } else {
+            (leader.x - 1, leader.y)
+        };
+        let source_i = w.grid.idx(source.0, source.1);
+        let target_i = w.grid.idx(target.0, target.1);
+        w.grid.terrain[target_i] = terrain::FOREST;
+        w.grid.road[target_i] = 1;
+        leader.move_budget = 10.0;
+        w.rebuild_occupancy(std::slice::from_ref(&leader));
+
+        assert_eq!(w.move_cost_to(target.0, target.1), 0.625);
+        assert!(w.try_step(&mut leader, target.0, target.1));
+        assert_eq!(w.clans[ci].stats.road_steps, 1);
+        assert_eq!(w.clans[ci].stats.road_cost_saved_milli, 625);
+
+        w.params.community_logistics = false;
+        w.grid.terrain[source_i] = terrain::FOREST;
+        w.grid.road[source_i] = 1;
+        leader.move_budget = 10.0;
+        assert_eq!(w.move_cost_to(source.0, source.1), 1.25);
+        assert!(w.try_step(&mut leader, source.0, source.1));
+        assert_eq!(w.clans[ci].stats.road_steps, 1);
+        assert_eq!(w.clans[ci].stats.road_cost_saved_milli, 625);
+    }
+
+    #[test]
+    fn wood_regrowth_rng_is_common_across_logistics_arms_and_fullness() {
+        let mut enabled = World::new(12, 53);
+        let mut disabled = World::new(12, 53);
+        enabled.params.community_logistics = true;
+        disabled.params.community_logistics = false;
+        for &i in &[3usize, 11, 27, 89] {
+            enabled.grid.terrain[i] = terrain::FOREST;
+            disabled.grid.terrain[i] = terrain::FOREST;
+            enabled.grid.wood[i] = FOREST_WOOD_CAP - 1;
+            disabled.grid.wood[i] = FOREST_WOOD_CAP;
+        }
+        enabled.tick = WOOD_REGROW_INTERVAL;
+        disabled.tick = WOOD_REGROW_INTERVAL;
+
+        enabled.regrow_wood();
+        disabled.regrow_wood();
+
+        assert_eq!(enabled.rng.f32(), disabled.rng.f32());
+        assert!(disabled
+            .grid
+            .wood
+            .iter()
+            .all(|&wood| wood == 0 || wood == FOREST_WOOD_CAP));
     }
 
     #[test]
@@ -2991,6 +3159,21 @@ mod tests {
         assert_eq!(w.grid.road[road_i], 1);
         assert_eq!(w.clans[ci].wood, 0);
         assert_eq!(w.clans[ci].stats.roads_built, 1);
+
+        w.params.community_logistics = false;
+        let second_i = w
+            .grid
+            .owner
+            .iter()
+            .enumerate()
+            .find_map(|(i, &owner)| (owner == id && i != road_i).then_some(i))
+            .expect("second founding tile");
+        w.grid.traffic[second_i] = ROAD_MIN_TRAFFIC + 5;
+        w.clans[ci].wood = ROAD_WOOD_COST;
+        w.build_roads();
+        assert_eq!(w.grid.road[second_i], 0);
+        assert_eq!(w.clans[ci].wood, ROAD_WOOD_COST);
+        assert_eq!(w.logistics_signals(ci), (0.0, 0.0));
 
         w.clear();
         assert!(w.grid.road.iter().all(|&v| v == 0));

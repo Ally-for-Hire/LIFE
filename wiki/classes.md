@@ -35,7 +35,8 @@ Every tunable variable, read live each tick: food/tree rates, **farms**
 (`farm_yield`, `farm_interval`, `home_range`, `expand_claim_radius`), **seasons**
 (`season_length`, `season_amp`), hunger/health, speed/vision, combat,
 `claim_interval`, `members_per_claim`, reproduction (`birth_*`), and terrain
-(`terrain_on`, `water_level`, `mountain_level`). See [Parameters](save-format.md).
+(`terrain_on`, `water_level`, `mountain_level`). `community_logistics` is the
+live infrastructure treatment/ablation switch. See [Parameters](save-format.md).
 
 ## `Entity` + `Goal` (`entity.rs`)
 
@@ -55,7 +56,8 @@ RDH population cap), `aggression`, current `mode`, cached targets (`enemy_pos`,
 `recruit_target`, `neutral_pos`, `trespasser_pos`, `expand_target`),
 `last_claim_tick`, and `stats` (kills / losses / recruits / peak / founded /
 `on_terr_tick_sum`, role time, wood delivered, roads built, and reserve
-deposits/releases). `ClanMode` is one of Gather / Recruit / Expand / Defend /
+deposits/releases, plus V1.1 `food_delivered`, `road_steps`, and
+`road_cost_saved_milli` causal counters). `ClanMode` is one of Gather / Recruit / Expand / Defend /
 Attack / Scout; `mode` is now the headline order while members can simultaneously
 hold different roles.
 

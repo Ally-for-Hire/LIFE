@@ -80,6 +80,20 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
   cannot hide a clan-vs-neutral survival regression.
 - Every `World` owns its own `Rng`; there is **no global RNG**. Same seed →
   identical run (covered by a test).
+- `community_logistics=false` is a deterministic infrastructure ablation. Wood
+  regrowth still consumes the same per-forest RNG draws but does not mutate the
+  layer, preventing avoidable RNG drift from the regrowth branch. Later divergence
+  caused by the mechanics changing movement, survival, or population is causal.
+  Existing roads remain in state but are ignored by movement-cost/pathing calculations.
+
+## Logistics validation counters
+
+V1 activity counters (`wood_delivered`, `roads_built`, reserve deposits/releases)
+show that the system ran. V1.1 adds causal-use evidence: `food_delivered` measures
+hauling throughput, `road_steps` counts real member movement on active roads, and
+`road_cost_saved_milli` accumulates the movement cost those road steps avoided.
+Quality/training expose hauling throughput and road utility separately while
+retaining the composite logistics field for compatibility.
 
 ## Rendering
 

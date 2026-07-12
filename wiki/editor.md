@@ -18,7 +18,8 @@ shape the layout like a game HUD.
 - **Click an NPC** to select it (yellow highlight) and read it in the Inspector.
 - Terrain is the base layer; clan territory tints over it; brown forest cells
   carry harvestable wood, tan cells are roads, bright green cells are food,
-  yellow cells are stockpiles, and leaders are lightened.
+  yellow cells are stockpiles, and leaders are lightened. During the logistics
+  ablation, retained roads turn gray because they provide no movement benefit.
 
 ## Controls panel (left)
 
@@ -29,7 +30,9 @@ shape the layout like a game HUD.
   population floor → **Populate fresh**.
 - **World Parameters** (collapsible groups, all live): Food/trees, Hunger/health,
   Movement/perception, Clans/combat, **Farming/seasons**, Growth/expansion, and
-  Terrain. **reset** restores defaults; your tuning survives Populate. See
+  Terrain. **Community logistics** exposes the live enable/ablation checkbox and
+  states exactly which mechanics/no-road-benefit semantics are active. **reset**
+  restores defaults; your tuning survives Populate. See
   [Parameters](save-format.md).
 - **View:** reset the camera; a legend of NPC/terrain colors.
 
@@ -39,7 +42,8 @@ shape the layout like a game HUD.
   and hunger bars, carried food/wood, speed, and position.
 - If it belongs to a clan: the clan's **order (mode)**, live workforce mix,
   members, ordinary/reserve food, shared wood, public-work counters, territory,
-  aggression, K/L/recruited, the **master → sub-mind routing** (which
+  aggression, K/L/recruited, food delivered, real road member-steps, measured
+  movement-cost savings, the **master → sub-mind routing** (which
   expert the leader is delegating to), and the **blended action utilities**.
 - A live **clan list** (color, mode, people, food/reserve, wood, roads, K/L).
 
@@ -52,8 +56,8 @@ Rolling plots of **population & leaders & clans**, **food on the map**, and
 
 - **Start / Stop** evolution (runs on a background thread across all CPU cores).
 - **Stats:** generation, best/avg/best-ever fitness, robust survival, food and
-  reserve security, community logistics, task coverage, routing/archive health,
-  and last-generation time.
+  reserve security, community logistics, **hauling throughput**, **road utility**,
+  task coverage, routing/archive health, and last-generation time.
 - **Config:** population, episode ticks, clans per arena, repeats, arena size,
   arena trees/neutrals, mutation rate & strength, elite count.
 - **Seed best brain → live world:** inject the current champion as a new clan so

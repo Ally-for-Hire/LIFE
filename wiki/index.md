@@ -41,7 +41,8 @@ world) finds the strategies. See [prior-art.md](prior-art.md) and
   arenas across all CPU cores via rayon.
 - **One NPC per tile:** movement is gated by a per-cell occupancy grid.
 - **Community logistics:** sticky roles, renewable wood, traffic-shaped roads,
-  and protected famine/disaster reserves create complementary village jobs.
+  and protected famine/disaster reserves create complementary village jobs;
+  V1.1 adds a live ablation plus hauling/road-benefit evidence.
 - **Death only from scarcity or combat:** NPCs remember food and home to it, so
   they never wander off and starve for no reason.
 - **Build/run:** `cd life-rs && cargo run --release`.

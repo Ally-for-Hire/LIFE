@@ -63,8 +63,12 @@ pub struct QualityScore {
     pub settlement: f32,
     pub expansion: f32,
     pub cooperation: f32,
-    /// Useful second-resource hauling and road construction per member-time.
+    /// Composite of useful hauling and causally observed road value.
     pub logistics: f32,
+    /// Food and wood delivered to the stockpile per member-time.
+    pub hauling_throughput: f32,
+    /// Road use and movement-cost savings, penalized when construction outruns use.
+    pub road_utility: f32,
     /// Emergency food held or deliberately cycled through the protected reserve.
     pub reserve_security: f32,
     /// Breadth and balance of sticky community jobs, including the safety core.
@@ -89,6 +93,8 @@ impl Default for QualityScore {
             expansion: 0.0,
             cooperation: 0.0,
             logistics: 0.0,
+            hauling_throughput: 0.0,
+            road_utility: 0.0,
             reserve_security: 0.0,
             task_coverage: 0.0,
             defense: 0.0,
@@ -192,16 +198,29 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
     let reserve_per_cap = food / pop.max(1.0);
     let member_ticks = c.stats.pop_tick_sum.max(1) as f32;
     let rate_per_1k = |events: u32| events as f32 * 1000.0 / member_ticks;
-    let wood_rate = rate_per_1k(c.stats.wood_delivered);
-    let road_rate = rate_per_1k(c.stats.roads_built);
+    let delivered = c
+        .stats
+        .food_delivered
+        .saturating_add(c.stats.wood_delivered);
+    let hauling_rate = rate_per_1k(delivered);
+    let hauling_throughput = saturating_rate(hauling_rate, 6.0);
+
+    // Construction has no value by itself. Credit roads only when members use
+    // them and the movement ledger records an actual cost saving. The final
+    // usefulness factor makes speculative road spam dilute, rather than raise,
+    // the score until traffic repays the construction footprint.
+    let road_utility = score_road_utility(
+        c.stats.road_steps,
+        c.stats.road_cost_saved_milli,
+        c.stats.roads_built,
+        c.stats.pop_tick_sum.max(1),
+    );
+    let logistics = (hauling_throughput * 0.60 + road_utility * 0.40).clamp(0.0, 1.0);
     let reserve_flow_rate = rate_per_1k(
         c.stats
             .reserve_deposited
             .saturating_add(c.stats.reserve_released),
     );
-    let wood_logistics = wood_rate / (wood_rate + 4.0);
-    let road_logistics = road_rate / (road_rate + 0.75);
-    let logistics = (wood_logistics * 0.60 + road_logistics * 0.40).clamp(0.0, 1.0);
     let protected_food = c.reserve_food.max(0) as f32 / pop.max(1.0);
     let reserve_coverage = (protected_food / 3.0).clamp(0.0, 1.0);
     let reserve_flow = reserve_flow_rate / (reserve_flow_rate + 3.0);
@@ -281,6 +300,8 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
         expansion,
         cooperation,
         logistics,
+        hauling_throughput,
+        road_utility,
         reserve_security,
         task_coverage,
         defense,
@@ -289,6 +310,38 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
         expert_coverage: 0.0,
         eligible: survival >= SURVIVAL_FLOOR && security >= SECURITY_FLOOR,
     }
+}
+
+fn saturating_rate(value: f32, half_saturation: f32) -> f32 {
+    if value <= 0.0 {
+        return 0.0;
+    }
+    value / (value + half_saturation.max(f32::EPSILON))
+}
+
+fn score_road_utility(
+    road_steps: u64,
+    road_savings_milli: u64,
+    roads_built: u32,
+    member_ticks: u64,
+) -> f32 {
+    let road_steps = road_steps as f32;
+    let road_savings_milli = road_savings_milli as f32;
+    let member_ticks = member_ticks.max(1) as f32;
+    let road_use = saturating_rate(road_steps * 1000.0 / member_ticks, 30.0);
+    let road_savings = saturating_rate(road_savings_milli / member_ticks, 30.0);
+    let saving_per_step = if road_steps > 0.0 {
+        (road_savings_milli / road_steps / 1_500.0).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let construction_debt = roads_built as f32 * 10_000.0;
+    let usefulness = if road_savings_milli > 0.0 {
+        road_savings_milli / (road_savings_milli + construction_debt)
+    } else {
+        0.0
+    };
+    ((road_use * 0.35 + road_savings * 0.45 + saving_per_step * 0.20) * usefulness).clamp(0.0, 1.0)
 }
 
 #[cfg(test)]
@@ -322,6 +375,19 @@ mod tests {
         };
         assert!(!quality.qualifies_for(StrategyNiche::Cooperator));
         assert!(quality.selection_score() < 1_000_000.0);
+    }
+
+    #[test]
+    fn roads_score_only_observed_transport_value_and_penalize_spam() {
+        assert_eq!(score_road_utility(0, 0, 100, 10_000), 0.0);
+        let useful = score_road_utility(600, 300_000, 4, 10_000);
+        let spammed = score_road_utility(600, 300_000, 40, 10_000);
+        let more_value = score_road_utility(1200, 600_000, 4, 10_000);
+        assert!(useful > spammed, "unused construction must dilute utility");
+        assert!(
+            more_value > useful,
+            "more observed savings must raise utility"
+        );
     }
 }
 

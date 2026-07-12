@@ -55,6 +55,11 @@ cargo run --release        # first release build takes a few minutes, then it's 
   simultaneous workforce instead of issuing one village-wide order. Gatherers
   deliver forest wood, expanders turn travelled owned cells into wood-built roads,
   and clans protect hauled food in an emergency reserve that releases during need.
+- **Logistics Validation V1.1:** a live logistics enable/ablation switch creates a
+  clean counterfactual, while food-delivery throughput, road member-steps, and
+  measured movement-cost savings distinguish useful infrastructure from activity.
+  With logistics disabled, existing roads remain visible but provide no movement
+  benefit.
 - **Combat**, **food-gated reproduction**, **food memory**, and **one NPC per
   tile**.
 - Game-like **toggleable panels**, an **NPC inspector** (its current "idea"),
@@ -68,7 +73,7 @@ cargo run --release        # first release build takes a few minutes, then it's 
 - **Viewport:** drag to pan, scroll to zoom, click an NPC to inspect it.
 - **Controls panel:** presets, populate counts, and every tunable world
   parameter (food/trees, hunger/health, movement/perception, clans/combat,
-  growth/expansion, terrain).
+  growth/expansion, Community Logistics enable/ablation, terrain).
 - **Training window:** start/stop evolution, edit the training config, watch the
   fitness graph, and seed the best brain into the live world.
 
@@ -78,7 +83,18 @@ cargo run --release        # first release build takes a few minutes, then it's 
 cd life-rs
 cargo test --release
 cargo test --release ai_quality_benchmark_is_deterministic -- --nocapture
+cargo test --release logistics_ablation_is_deterministic -- --nocapture
+cargo test --release tracked_champion_logistics_preserves_survival_gates -- --nocapture
 ```
+
+The V1.1 tests run paired logistics-on/off worlds with the same brain, seeds, and
+world specifications. Ordinary training does not pay this doubled simulation
+cost; the ablation is an explicit release-validation gate.
+
+Current tracked-champion result across 13 paired worlds: initial-clan survival
+**1.000 / 1.000** (enabled/disabled), food security **0.928 / 0.935**, hauling
+throughput **0.438 / 0.372**, road utility **0.290 / 0**, and enabled fairness
+**+0.009**. The small security cost is bounded by a strict one-point tolerance.
 
 `life-rs/champion.bin` is the tracked deployable model. Marathon logs, stage/gen
 snapshots, backup champions, and `target/` are generated locally and git-ignored.

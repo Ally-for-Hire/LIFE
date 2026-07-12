@@ -41,11 +41,49 @@ pub struct AiBenchmarkReport {
     pub fairness_delta: f32,
     pub robust_fairness_delta: f32,
     pub mean_logistics: f32,
+    pub mean_hauling_throughput: f32,
+    pub mean_road_utility: f32,
     pub mean_reserve_security: f32,
     pub mean_task_coverage: f32,
     pub routing_entropy: f32,
     pub expert_coverage: f32,
     pub eligible: bool,
+}
+
+/// One arm of a paired logistics benchmark. Values are means across identical
+/// generated worlds; robust survival/fairness retain their worst-world gates.
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct LogisticsBenchmarkArm {
+    pub robust_survival: f32,
+    pub mean_security: f32,
+    pub clan_cohort_survival: f32,
+    pub neutral_cohort_survival: f32,
+    pub fairness_delta: f32,
+    pub robust_fairness_delta: f32,
+    pub hauling_throughput: f32,
+    pub road_utility: f32,
+    pub reserve_use: f32,
+    pub reserve_security: f32,
+    pub eligible: bool,
+}
+
+/// Deterministic same-world logistics-on/off ablation. This is an explicit
+/// benchmark and is never invoked by ordinary generation evaluation, so it
+/// does not double normal training cost.
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct LogisticsBenchmarkReport {
+    pub worlds: usize,
+    pub enabled: LogisticsBenchmarkArm,
+    pub disabled: LogisticsBenchmarkArm,
+    pub clan_survival_delta: f32,
+    pub security_delta: f32,
+    pub hauling_throughput_delta: f32,
+    pub road_utility_delta: f32,
+    pub reserve_use_delta: f32,
+    pub reserve_security_delta: f32,
+    pub survival_non_regression: bool,
 }
 
 #[derive(Clone)]
@@ -111,6 +149,8 @@ pub struct Trainer {
     pub mean_security: f32,
     pub fairness_margin: f32,
     pub mean_logistics: f32,
+    pub mean_hauling_throughput: f32,
+    pub mean_road_utility: f32,
     pub mean_reserve_security: f32,
     pub mean_task_coverage: f32,
     pub routing_balance: f32,
@@ -153,6 +193,8 @@ impl Trainer {
             mean_security: 0.0,
             fairness_margin: 0.0,
             mean_logistics: 0.0,
+            mean_hauling_throughput: 0.0,
+            mean_road_utility: 0.0,
             mean_reserve_security: 0.0,
             mean_task_coverage: 0.0,
             routing_balance: 0.0,
@@ -385,11 +427,13 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
             append(
                 log_path,
                 &format!(
-                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} reserve {:.2} tasks {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
+                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} haul {:.2} roads {:.2} reserve {:.2} tasks {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
                     champ_score,
                     cq.robust_survival,
                     cq.security,
                     cq.logistics,
+                    cq.hauling_throughput,
+                    cq.road_utility,
                     cq.reserve_security,
                     cq.task_coverage,
                     cq.routing_entropy,
@@ -509,6 +553,8 @@ impl Trainer {
         self.mean_security = best_quality.security;
         self.fairness_margin = best_quality.robust_fairness;
         self.mean_logistics = best_quality.logistics;
+        self.mean_hauling_throughput = best_quality.hauling_throughput;
+        self.mean_road_utility = best_quality.road_utility;
         self.mean_reserve_security = best_quality.reserve_security;
         self.mean_task_coverage = best_quality.task_coverage;
         self.routing_balance = best_quality.routing_entropy * best_quality.expert_coverage;
@@ -889,6 +935,8 @@ impl QualityTotals {
         self.sum.expansion += score.expansion;
         self.sum.cooperation += score.cooperation;
         self.sum.logistics += score.logistics;
+        self.sum.hauling_throughput += score.hauling_throughput;
+        self.sum.road_utility += score.road_utility;
         self.sum.reserve_security += score.reserve_security;
         self.sum.task_coverage += score.task_coverage;
         self.sum.defense += score.defense;
@@ -918,6 +966,8 @@ impl QualityTotals {
             expansion: self.sum.expansion * inv,
             cooperation: self.sum.cooperation * inv,
             logistics: self.sum.logistics * inv,
+            hauling_throughput: self.sum.hauling_throughput * inv,
+            road_utility: self.sum.road_utility * inv,
             reserve_security: self.sum.reserve_security * inv,
             task_coverage: self.sum.task_coverage * inv,
             defense: self.sum.defense * inv,
@@ -1257,11 +1307,179 @@ pub fn benchmark_ai_quality(
         fairness_delta,
         robust_fairness_delta: quality.robust_fairness,
         mean_logistics: quality.logistics,
+        mean_hauling_throughput: quality.hauling_throughput,
+        mean_road_utility: quality.road_utility,
         mean_reserve_security: quality.reserve_security,
         mean_task_coverage: quality.task_coverage,
         routing_entropy: quality.routing_entropy,
         expert_coverage: quality.expert_coverage,
         eligible: quality.eligible && fairness_delta >= -0.05,
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct LogisticsBenchmarkObservation {
+    quality: QualityScore,
+    clan_cohort_survival: f32,
+    neutral_cohort_survival: f32,
+    reserve_use: f32,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct LogisticsArmTotals {
+    quality: QualityTotals,
+    clan_cohort_survival: f32,
+    neutral_cohort_survival: f32,
+    reserve_use: f32,
+    count: u32,
+}
+
+#[cfg(test)]
+impl LogisticsArmTotals {
+    fn add(&mut self, observation: LogisticsBenchmarkObservation) {
+        self.quality.add(observation.quality);
+        self.clan_cohort_survival += observation.clan_cohort_survival;
+        self.neutral_cohort_survival += observation.neutral_cohort_survival;
+        self.reserve_use += observation.reserve_use;
+        self.count += 1;
+    }
+
+    fn finish(self, brain: &Brain) -> LogisticsBenchmarkArm {
+        if self.count == 0 {
+            return LogisticsBenchmarkArm::default();
+        }
+        let inv = 1.0 / self.count as f32;
+        let quality = self.quality.finish(brain);
+        let clan_cohort_survival = self.clan_cohort_survival * inv;
+        let neutral_cohort_survival = self.neutral_cohort_survival * inv;
+        let fairness_delta = clan_cohort_survival - neutral_cohort_survival;
+        LogisticsBenchmarkArm {
+            robust_survival: quality.robust_survival,
+            mean_security: quality.security,
+            clan_cohort_survival,
+            neutral_cohort_survival,
+            fairness_delta,
+            robust_fairness_delta: quality.robust_fairness,
+            hauling_throughput: quality.hauling_throughput,
+            road_utility: quality.road_utility,
+            reserve_use: self.reserve_use * inv,
+            reserve_security: quality.reserve_security,
+            eligible: quality.eligible && fairness_delta >= FAIRNESS_FLOOR,
+        }
+    }
+}
+
+/// Compare Community Logistics V1 against a disabled control on identical
+/// generated worlds and seeds. Both arms start from the same initial cohort;
+/// only `Params::community_logistics` differs. Call this explicitly for release
+/// validation or diagnostics -- ordinary training never pays for both arms.
+#[cfg(test)]
+pub fn benchmark_logistics_quality(
+    brain: &Brain,
+    base: &Params,
+    stage: u32,
+    episode: i32,
+    n_worlds: usize,
+    seed: u64,
+) -> LogisticsBenchmarkReport {
+    if n_worlds == 0 {
+        return LogisticsBenchmarkReport::default();
+    }
+    let paired: Vec<(LogisticsBenchmarkObservation, LogisticsBenchmarkObservation)> = (0..n_worlds)
+        .into_par_iter()
+        .map(|wi| {
+            let mut wr = Rng::new(seed ^ (wi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let eff_stage = (wi as u32) % (stage + 1);
+            let spec = random_world_spec(base, &mut wr, eff_stage);
+            let aseed = seed.wrapping_add((wi as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+            (
+                run_logistics_benchmark_arm(brain, &spec, episode, aseed, true),
+                run_logistics_benchmark_arm(brain, &spec, episode, aseed, false),
+            )
+        })
+        .collect();
+
+    let mut enabled_totals = LogisticsArmTotals::default();
+    let mut disabled_totals = LogisticsArmTotals::default();
+    for (enabled, disabled) in paired {
+        enabled_totals.add(enabled);
+        disabled_totals.add(disabled);
+    }
+    let enabled = enabled_totals.finish(brain);
+    let disabled = disabled_totals.finish(brain);
+    let clan_survival_delta = enabled.clan_cohort_survival - disabled.clan_cohort_survival;
+    LogisticsBenchmarkReport {
+        worlds: n_worlds,
+        clan_survival_delta,
+        security_delta: enabled.mean_security - disabled.mean_security,
+        hauling_throughput_delta: enabled.hauling_throughput - disabled.hauling_throughput,
+        road_utility_delta: enabled.road_utility - disabled.road_utility,
+        reserve_use_delta: enabled.reserve_use - disabled.reserve_use,
+        reserve_security_delta: enabled.reserve_security - disabled.reserve_security,
+        survival_non_regression: enabled.robust_survival + 1e-6 >= disabled.robust_survival
+            && clan_survival_delta >= -1e-6,
+        enabled,
+        disabled,
+    }
+}
+
+#[cfg(test)]
+fn run_logistics_benchmark_arm(
+    brain: &Brain,
+    spec: &WorldSpec,
+    episode: i32,
+    seed: u64,
+    community_logistics: bool,
+) -> LogisticsBenchmarkObservation {
+    let mut world = World::new(spec.world_size, seed);
+    world.params = spec.params.clone();
+    world.params.community_logistics = community_logistics;
+    let ids = world.setup_arena(std::slice::from_ref(brain), spec.trees, spec.neutrals);
+    let cid = ids[0];
+    let clan_cohort: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.clan == cid)
+        .map(|entity| entity.id)
+        .collect();
+    let neutral_cohort: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.clan < 0)
+        .map(|entity| entity.id)
+        .collect();
+    for _ in 0..episode {
+        world.step();
+    }
+    let alive: HashSet<u32> = world.entities.iter().map(|entity| entity.id).collect();
+    let cohort_ratio = |cohort: &HashSet<u32>| {
+        if cohort.is_empty() {
+            1.0
+        } else {
+            cohort.iter().filter(|id| alive.contains(id)).count() as f32 / cohort.len() as f32
+        }
+    };
+    let clan_cohort_survival = cohort_ratio(&clan_cohort);
+    let neutral_cohort_survival = cohort_ratio(&neutral_cohort);
+    let mut quality = score_clan_quality(&world, cid);
+    quality.fairness = clan_cohort_survival - neutral_cohort_survival;
+    quality.robust_fairness = quality.fairness;
+    quality.eligible &= quality.fairness >= FAIRNESS_FLOOR;
+    let reserve_use = world.clan_by_id(cid).map_or(0.0, |clan| {
+        let events = clan
+            .stats
+            .reserve_deposited
+            .saturating_add(clan.stats.reserve_released) as f32;
+        let rate = events * 1000.0 / clan.stats.pop_tick_sum.max(1) as f32;
+        rate / (rate + 3.0)
+    });
+    LogisticsBenchmarkObservation {
+        quality,
+        clan_cohort_survival,
+        neutral_cohort_survival,
+        reserve_use,
     }
 }
 
@@ -1377,6 +1595,8 @@ mod tests {
         assert!((a.fairness_delta - b.fairness_delta).abs() < 1e-6);
         assert!((a.robust_fairness_delta - b.robust_fairness_delta).abs() < 1e-6);
         assert!((a.mean_logistics - b.mean_logistics).abs() < 1e-6);
+        assert!((a.mean_hauling_throughput - b.mean_hauling_throughput).abs() < 1e-6);
+        assert!((a.mean_road_utility - b.mean_road_utility).abs() < 1e-6);
         assert!((a.mean_reserve_security - b.mean_reserve_security).abs() < 1e-6);
         assert!((a.mean_task_coverage - b.mean_task_coverage).abs() < 1e-6);
         assert!((0.0..=1.0).contains(&a.routing_entropy));
@@ -1401,6 +1621,72 @@ mod tests {
         assert!(
             a.routing_entropy >= 0.10,
             "routing collapse regressed: {a:#?}"
+        );
+    }
+
+    #[test]
+    fn logistics_ablation_is_deterministic() {
+        let brain = Brain::load(CHAMPION_PATH).expect("tracked champion.bin should load");
+        let base = Params::default();
+        let a = benchmark_logistics_quality(&brain, &base, 3, 1500, 4, 0x10C1_571C5);
+        let b = benchmark_logistics_quality(&brain, &base, 3, 1500, 4, 0x10C1_571C5);
+        assert_eq!(a.worlds, b.worlds);
+        assert!((a.clan_survival_delta - b.clan_survival_delta).abs() < 1e-6);
+        assert!((a.security_delta - b.security_delta).abs() < 1e-6);
+        assert!((a.hauling_throughput_delta - b.hauling_throughput_delta).abs() < 1e-6);
+        assert!((a.road_utility_delta - b.road_utility_delta).abs() < 1e-6);
+        assert!((a.reserve_use_delta - b.reserve_use_delta).abs() < 1e-6);
+        assert!((a.reserve_security_delta - b.reserve_security_delta).abs() < 1e-6);
+        assert_eq!(a.survival_non_regression, b.survival_non_regression);
+        assert_eq!(a.disabled.road_utility, 0.0);
+    }
+
+    #[test]
+    fn tracked_champion_logistics_preserves_survival_gates() {
+        let brain = Brain::load(CHAMPION_PATH).expect("tracked champion.bin should load");
+        let report = benchmark_logistics_quality(
+            &brain,
+            &Params::default(),
+            MAX_STAGE,
+            4000,
+            13,
+            0x51FE_BEEF,
+        );
+        println!("Community Logistics V1.1 paired benchmark: {report:#?}");
+        assert!(
+            report.enabled.eligible,
+            "enabled logistics must preserve survival/security/fairness gates: {report:#?}"
+        );
+        assert!(
+            report.enabled.robust_survival >= 0.95,
+            "enabled logistics robust survival regressed: {report:#?}"
+        );
+        assert!(
+            report.enabled.mean_security >= 0.80,
+            "enabled logistics food security regressed: {report:#?}"
+        );
+        assert!(
+            report.enabled.fairness_delta >= FAIRNESS_FLOOR,
+            "enabled logistics fairness regressed: {report:#?}"
+        );
+        assert!(
+            report.enabled.robust_fairness_delta >= FAIRNESS_FLOOR,
+            "enabled logistics worst-world fairness regressed: {report:#?}"
+        );
+        assert!(
+            (report.enabled.fairness_delta
+                - (report.enabled.clan_cohort_survival - report.enabled.neutral_cohort_survival))
+                .abs()
+                < 1e-6,
+            "cohort fairness accounting diverged: {report:#?}"
+        );
+        assert!(
+            report.survival_non_regression,
+            "logistics-enabled cohort survival fell below the paired control: {report:#?}"
+        );
+        assert!(
+            report.security_delta >= -0.01,
+            "logistics-enabled food security fell materially below the paired control: {report:#?}"
         );
     }
 

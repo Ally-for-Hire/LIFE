@@ -49,6 +49,8 @@ struct ClanSnap {
     max_dist: f32,
     on_terr: f32, // fraction of members standing on owned land
     logistics: f32,
+    hauling_throughput: f32,
+    road_utility: f32,
     reserve_security: f32,
     task_coverage: f32,
 }
@@ -93,6 +95,8 @@ fn snapshot_clans(w: &World) -> Vec<ClanSnap> {
             max_dist: dmax,
             on_terr: on as f32 / n as f32,
             logistics: quality.logistics,
+            hauling_throughput: quality.hauling_throughput,
+            road_utility: quality.road_utility,
             reserve_security: quality.reserve_security,
             task_coverage: quality.task_coverage,
         });
@@ -119,8 +123,8 @@ fn mode_histogram(w: &World) -> std::collections::BTreeMap<&'static str, usize> 
 fn report(label: &str, mut w: World, ticks: i32, every: i32) {
     println!("\n================ {label} ================");
     println!(
-        "{:>6} | {:>4} {:>4} {:>4} | {:>6} {:>6} {:>6} | {:>8} {:>7} {:>7} | {:>4} {:>4} {:>4} | modes",
-        "tick", "pop", "cln", "ldr", "food", "strv", "kill", "homeDist", "onTerr%", "terr", "log%", "res%", "task%"
+        "{:>6} | {:>4} {:>4} {:>4} | {:>6} {:>6} {:>6} | {:>8} {:>7} {:>7} | {:>4} {:>5} {:>5} {:>4} {:>5} | modes",
+        "tick", "pop", "cln", "ldr", "food", "strv", "kill", "homeDist", "onTerr%", "terr", "log%", "haul%", "road%", "res%", "task%"
     );
     let mut t = 0;
     while t < ticks {
@@ -136,12 +140,14 @@ fn report(label: &str, mut w: World, ticks: i32, every: i32) {
         let total_terr: u32 = clans.iter().map(|c| c.territory).sum();
         let total_clan_food: i32 = clans.iter().map(|c| c.food).sum();
         // pop-weighted means
-        let (mut dsum, mut osum, mut lsum, mut rsum, mut tsum, mut wn) =
-            (0f32, 0f32, 0f32, 0f32, 0f32, 0f32);
+        let (mut dsum, mut osum, mut lsum, mut hsum, mut usum, mut rsum, mut tsum, mut wn) =
+            (0f32, 0f32, 0f32, 0f32, 0f32, 0f32, 0f32, 0f32);
         for c in &clans {
             dsum += c.home_dist * c.pop as f32;
             osum += c.on_terr * c.pop as f32;
             lsum += c.logistics * c.pop as f32;
+            hsum += c.hauling_throughput * c.pop as f32;
+            usum += c.road_utility * c.pop as f32;
             rsum += c.reserve_security * c.pop as f32;
             tsum += c.task_coverage * c.pop as f32;
             wn += c.pop as f32;
@@ -149,12 +155,14 @@ fn report(label: &str, mut w: World, ticks: i32, every: i32) {
         let home_dist = if wn > 0.0 { dsum / wn } else { 0.0 };
         let on_terr = if wn > 0.0 { osum / wn } else { 0.0 };
         let logistics = if wn > 0.0 { lsum / wn } else { 0.0 };
+        let hauling = if wn > 0.0 { hsum / wn } else { 0.0 };
+        let road_utility = if wn > 0.0 { usum / wn } else { 0.0 };
         let reserve = if wn > 0.0 { rsum / wn } else { 0.0 };
         let tasks = if wn > 0.0 { tsum / wn } else { 0.0 };
         let modes = mode_histogram(&w);
         let modestr: Vec<String> = modes.iter().map(|(k, v)| format!("{k}:{v}")).collect();
         println!(
-            "{:>6} | {:>4} {:>4} {:>4} | {:>6} {:>6} {:>6} | {:>8.1} {:>6.0}% {:>7} | {:>3.0}% {:>3.0}% {:>3.0}% | {}",
+            "{:>6} | {:>4} {:>4} {:>4} | {:>6} {:>6} {:>6} | {:>8.1} {:>6.0}% {:>7} | {:>3.0}% {:>3.0}% {:>3.0}% {:>3.0}% {:>3.0}% | {}",
             t,
             total_pop,
             w.clan_count(),
@@ -166,6 +174,8 @@ fn report(label: &str, mut w: World, ticks: i32, every: i32) {
             on_terr * 100.0,
             total_terr,
             logistics * 100.0,
+            hauling * 100.0,
+            road_utility * 100.0,
             reserve * 100.0,
             tasks * 100.0,
             modestr.join(" ")
@@ -178,10 +188,11 @@ fn report(label: &str, mut w: World, ticks: i32, every: i32) {
     clans.sort_by_key(|c| std::cmp::Reverse(c.pop));
     for c in &clans {
         println!(
-            "  clan#{:<3} pop{:<4} terr{:<5} food{:<5} wood{:<4} reserve{:<4} roads{:<3} {:<8} K{:<3} L{:<3} R{:<3} home{:>5.1} max{:>5.1} onTerr{:>4.0}% logistics{:>3.0}% reserve{:>3.0}% tasks{:>3.0}%",
+            "  clan#{:<3} pop{:<4} terr{:<5} food{:<5} wood{:<4} reserve{:<4} roads{:<3} {:<8} K{:<3} L{:<3} R{:<3} home{:>5.1} max{:>5.1} onTerr{:>4.0}% logistics{:>3.0}% haul{:>3.0}% road{:>3.0}% reserve{:>3.0}% tasks{:>3.0}%",
             c.id, c.pop, c.territory, c.food, c.wood, c.reserve_food, c.roads_built,
             c.mode.label(), c.kills, c.losses, c.recruits,
             c.home_dist, c.max_dist, c.on_terr * 100.0, c.logistics * 100.0,
+            c.hauling_throughput * 100.0, c.road_utility * 100.0,
             c.reserve_security * 100.0, c.task_coverage * 100.0
         );
     }
@@ -327,6 +338,40 @@ fn diag_showcase() {
         w.seed_clan(champ.clone());
     }
     report("TRAINED CHAMPION showcase 24k", w, 24_000, 4000);
+}
+
+/// Causal Community Logistics V1.1 report: every enabled world is paired with
+/// a logistics-disabled control built from the exact same world spec and seed.
+#[test]
+fn diag_logistics_ablation() {
+    use crate::brain::Brain;
+    use crate::trainer::{benchmark_logistics_quality, CHAMPION_PATH, MAX_STAGE};
+    let champ = match Brain::load(CHAMPION_PATH) {
+        Ok(brain) => brain,
+        Err(error) => {
+            println!("no champion to benchmark ({error})");
+            return;
+        }
+    };
+    let report =
+        benchmark_logistics_quality(&champ, &Params::default(), MAX_STAGE, 4000, 13, 0x51FE_BEEF);
+    println!("\n== Community Logistics V1.1 paired ablation ==");
+    println!("worlds: {}", report.worlds);
+    println!("enabled : {:#?}", report.enabled);
+    println!("disabled: {:#?}", report.disabled);
+    println!(
+        "deltas: clan survival {:+.3}, security {:+.3}, haul {:+.3}, road utility {:+.3}, reserve use/score {:+.3}/{:+.3}",
+        report.clan_survival_delta,
+        report.security_delta,
+        report.hauling_throughput_delta,
+        report.road_utility_delta,
+        report.reserve_use_delta,
+        report.reserve_security_delta,
+    );
+    println!(
+        "survival non-regression: {}",
+        report.survival_non_regression
+    );
 }
 
 /// Probe the trained champion's mixture-of-experts: across representative

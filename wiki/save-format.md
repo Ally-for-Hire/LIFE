@@ -70,11 +70,26 @@ season cycle turns plenty into scarcity.
 | `birth_interval` | 180 | ticks between reproduction checks |
 | `birth_food_cost` | 4 | food a clan spends per birth |
 
-## Community Logistics V1 (fixed rules)
+## Community Logistics V1 / Validation V1.1
 
-The first logistics slice deliberately adds no live `Params` knobs, so there is
-no separate parameter panel yet. These deterministic constants define the V1
-contract:
+V1's mechanics use fixed deterministic constants. V1.1 adds one live causal
+validation switch:
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `community_logistics` | true | enables wood jobs, protected reserves, road construction, and road movement savings; false is the paired infrastructure-disabled ablation |
+
+Disabling logistics does not erase existing road cells, which keeps world state
+and rendering comparable. Those roads provide **no movement-cost benefit** while
+the toggle is off, and the UI renders them gray. Delivered food goes entirely to
+the ordinary stockpile; no reserve is filled/released, no wood job is selected,
+and no road is built. Simultaneous sticky workforce assignments stay enabled so
+the ablation isolates infrastructure rather than reverting the whole leadership
+model. Wood regrowth consumes the same deterministic RNG draws in both arms, but
+mutates wood only when enabled; this prevents avoidable regrowth-branch drift,
+while later behavior-driven divergence remains part of the treatment effect.
+
+The fixed V1 mechanics are:
 
 | Rule | Value | Meaning |
 | --- | --- | --- |
@@ -86,6 +101,7 @@ contract:
 | road traffic floor | 3 | minimum recent movement pressure before a cell qualifies |
 | ordinary food target | 4 per member | hauled food fills this working stockpile first |
 | emergency reserve cap | 4 per member | surplus food protected for direct feeding after ordinary food runs out |
+| wood-labor safety gate | ordinary floor + full reserve | gathering shifts to wood only after both food buffers are ready |
 
 Brain inputs 16, 20, and 21 now expose road coverage, stored wood per member,
 and reachable forest wood. The network dimensions remain fixed, so existing

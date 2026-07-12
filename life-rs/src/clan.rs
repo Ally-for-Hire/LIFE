@@ -66,8 +66,12 @@ pub struct ClanStats {
     /// toward villages that use their land, not nomads that just claim it.
     pub on_terr_tick_sum: u64,
     /// Material delivered and public works completed by the community.
+    pub food_delivered: u32,
     pub wood_delivered: u32,
     pub roads_built: u32,
+    /// Successful member steps onto roads and the movement cost those roads saved.
+    pub road_steps: u64,
+    pub road_cost_saved_milli: u64,
     pub reserve_deposited: u32,
     pub reserve_released: u32,
     /// Member-ticks by assigned role (output order from `Brain`).
