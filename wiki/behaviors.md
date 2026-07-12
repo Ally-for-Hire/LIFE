@@ -55,8 +55,10 @@ and walks to a neutral.
 
 The leader's brain is a **mixture-of-experts**: a master *gate* network reads the
 clan's situation and routes (softmax) over several *sub-minds*, each proposing a
-full action vector; the decision is the gate-weighted blend. The brain picks the
-**mode** and an **aggression** dial directly — there are no strategy gates, only
+full action vector; the decision is the gate-weighted blend. The six action
+utilities allocate the clan's workforce while the strongest feasible utility
+remains its headline **mode**; the brain also sets an **aggression** dial. There
+are no strategy gates, only
 physical feasibility (you can't recruit with no neutral, expand with no frontier,
 or attack with no enemy). Evolution shapes both the sub-minds and the routing.
 
@@ -68,6 +70,28 @@ or attack with no enemy). Evolution shapes both the sub-minds and the routing.
 | Defend | hold near the stockpile |
 | Attack | a war-party (healthy members) marches on the enemy; the rest keep working |
 | Scout | leader explores |
+
+## Community Logistics V1
+
+Clans now work on several complementary jobs at once. Every leader decision turns
+the six feasible utilities into deterministic member quotas. Assignments are
+sticky long enough to prevent workers from oscillating between jobs, and small or
+stressed clans keep a gathering safety core. Personal hunger and an immediate
+trespasser threat still override any assignment, preserving the original
+survival-first contract.
+
+- **Wood:** forest tiles hold a separate, renewable material supply. Gathering
+  workers fetch wood when the clan needs construction material and haul it to the
+  shared stockpile; food remains their first survival responsibility.
+- **Roads:** movement leaves a traffic trace. Expanders spend shared wood to pave
+  useful, owned, passable cells, and completed roads halve movement cost for
+  hauling, defense, and reinforcement.
+- **Emergency reserve:** surplus hauled food is protected separately from the
+  ordinary stockpile. The reserve is unavailable to routine births and raiding,
+  then releases automatically when ordinary food runs lean or a disaster strikes.
+- **Brain compatibility:** inputs 16, 20, and 21 now report road coverage, stored
+  wood per member, and local wood availability. The network dimensions and saved
+  `champion.bin` format do not change.
 
 If a leader dies a follower is promoted; a clan disbands only when no members
 remain (its territory is then freed). To keep the world a living patchwork,
@@ -120,8 +144,9 @@ when a rival's harvest fails.
 Procedurally generated each Populate: water, sand, plains, forest, hills,
 mountains, plus a **clumped fertility field** (a low-frequency noise so good
 farmland is rare and patchy — the valleys worth fighting for). Water is
-impassable; mountains/hills/forest cost more to cross; roads halve cost (hook
-ready). Pellets grow on passable land only.
+impassable; mountains/hills/forest cost more to cross; community-built roads halve
+cost. Forest terrain also supplies the wood used for those roads. Pellets grow on
+passable land only.
 
 ## Evolution
 

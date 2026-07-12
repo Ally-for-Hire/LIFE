@@ -29,7 +29,9 @@ tile?". Here each layer is a flat `Vec` indexed by `y * size + x`:
 - `terrain: Vec<u8>` — water / sand / plains / forest / hill / mountain.
 - `fertility: Vec<u8>` — scales food growth.
 - `owner: Vec<i32>` — owning clan id per tile (`-1` = none); **O(1) ownership**.
-- `road: Vec<u8>` — road level (halves move cost; hook for the roads layer).
+- `road: Vec<u8>` — completed community roads; road cells halve movement cost.
+- `wood: Vec<u8>` — harvestable material on forest tiles, with deterministic regrowth.
+- `traffic: Vec<u16>` — recent movement pressure used to place roads on useful routes.
 - `pellet: Vec<u8>` — food energy per cell.
 
 The world also keeps an **occupancy grid** (`Vec<u16>`, rebuilt each tick) that
@@ -44,14 +46,16 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
 1. **grow_farms** — owned, fertile tiles grow food (× `season_factor`); farms get
    first call on the food budget so cultivated land out-produces wilderness.
 2. **update_trees** — wild food drops on *unclaimed* passable cells only (× season).
-3. **clan_think** — every 120 ticks the leader's mixture-of-experts brain picks a
-   mode + aggression from a fixed 32-input situation vector (live features,
-   reserved future-system slots, and bias; no strategy gates, just
-   physical feasibility); every 15 ticks it refreshes cached targets (nearest
+3. **clan_think** — every 120 ticks the leader's mixture-of-experts brain turns
+   all six feasible action utilities into deterministic, sticky workforce quotas
+   while retaining a headline mode + aggression. Inputs 16/20/21 expose road
+   coverage, stored wood, and nearby wood availability without changing the fixed
+   32-input brain shape. Every 15 ticks it refreshes cached targets (nearest
    enemy, neutral, trespasser, fertility-scored frontier). Targets are cached on
    the clan so per-entity updates never scan the world.
 4. **rebuild occupancy**, then **update each entity** (hunger/individual foraging
-   first as a safety net, then the clan-mode behaviour, movement).
+   first as a safety net, then its assigned community role, movement, wood
+   delivery, and road work).
 5. **recruitment** (deliberate only), **combat** (trespasser / on-campaign / war),
    **raiding** (stockpile theft), **detach the dead** (losses, succession,
    disbanding), **record stats**.
@@ -80,6 +84,6 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
 ## Rendering
 
 Each frame the world is painted into a `Color32` pixel buffer (terrain base →
-territory tint → pellets → trees → stockpiles → entities), uploaded as a
+territory tint → wood/roads → pellets → trees → stockpiles → entities), uploaded as a
 NEAREST-filtered texture, and drawn into the viewport with pan/zoom. One cell =
 one texel.

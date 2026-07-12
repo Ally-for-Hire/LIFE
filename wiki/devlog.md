@@ -234,6 +234,30 @@ coverage **0.75**.
 The thresholds intentionally freeze today's survival floor while future training
 has room to improve specialization.
 
+### A15 — Community Logistics V1
+
+Clan decisions now turn the unchanged six brain utilities into deterministic,
+sticky workforce assignments instead of one village-wide order. Every viable
+workforce keeps gathering and defense cores while the leader remains the only
+Recruit/Scout specialist; hunger and immediate border defense still override jobs.
+
+Forest tiles now supply renewable wood. Gatherers haul it to the shared stockpile,
+and active expand crews spend it on traffic-shaped roads across owned land; roads
+halve movement cost. Food haulers fill ordinary working stores first, then protect
+surplus in an emergency reserve that births and raiders cannot consume. The reserve
+automatically feeds hungry members after ordinary food runs out. Reserved brain
+inputs 16, 20, and 21 now expose road coverage, stored wood per member, and local
+wood availability without changing `champion.bin` dimensions.
+
+The cooperator niche now measures logistics throughput, reserve security, and task
+coverage in addition to recruitment. These remain quality signals, not hard gates;
+survival, food security, and clan-vs-neutral fairness still determine eligibility.
+The fixed 13-world tracked-champion benchmark passed with robust survival **1.00**,
+food security **0.93**, clan/neutral cohort survival **1.00 / 0.995**, logistics
+**0.39**, reserve security **0.57**, and task coverage **0.63**. A 24k-tick showcase
+ended with population **288**, five surviving clans, **zero starvation**, 23 kills,
+and 1,274 roads built across the five communities.
+
 ## Open ideas / next
 
 - **Diplomacy / trade:** friendly clans exchange food; relationship memory; a

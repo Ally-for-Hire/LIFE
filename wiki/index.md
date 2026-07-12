@@ -29,7 +29,8 @@ master controller routing over specialist sub-minds). Territory is the economy:
 (despotic exclusion), so villages settle on good land, work it within a home
 range, expand onto fertile frontier, take in refugees, and **fight over the best
 valleys** — especially when **seasons** turn lean. Almost nothing is hand-scripted:
-the nets pick what to do, and evolution (offline in arenas + in-vivo in the live
+the nets allocate a simultaneous workforce, communities turn forest wood into
+roads and emergency reserves, and evolution (offline in arenas + in-vivo in the live
 world) finds the strategies. See [prior-art.md](prior-art.md) and
 [devlog.md](devlog.md).
 
@@ -39,6 +40,8 @@ world) finds the strategies. See [prior-art.md](prior-art.md) and
 - **Performance:** the view reads sim memory directly; training fans independent
   arenas across all CPU cores via rayon.
 - **One NPC per tile:** movement is gated by a per-cell occupancy grid.
+- **Community logistics:** sticky roles, renewable wood, traffic-shaped roads,
+  and protected famine/disaster reserves create complementary village jobs.
 - **Death only from scarcity or combat:** NPCs remember food and home to it, so
   they never wander off and starve for no reason.
 - **Build/run:** `cd life-rs && cargo run --release`.

@@ -39,6 +39,10 @@ pub struct AiBenchmarkReport {
     pub clan_cohort_survival: f32,
     pub neutral_cohort_survival: f32,
     pub fairness_delta: f32,
+    pub robust_fairness_delta: f32,
+    pub mean_logistics: f32,
+    pub mean_reserve_security: f32,
+    pub mean_task_coverage: f32,
     pub routing_entropy: f32,
     pub expert_coverage: f32,
     pub eligible: bool,
@@ -106,6 +110,9 @@ pub struct Trainer {
     pub robust_survival: f32,
     pub mean_security: f32,
     pub fairness_margin: f32,
+    pub mean_logistics: f32,
+    pub mean_reserve_security: f32,
+    pub mean_task_coverage: f32,
     pub routing_balance: f32,
     pub history: Vec<[f64; 2]>,     // (generation, best fitness)
     pub avg_history: Vec<[f64; 2]>, // (generation, average fitness)
@@ -145,6 +152,9 @@ impl Trainer {
             robust_survival: 0.0,
             mean_security: 0.0,
             fairness_margin: 0.0,
+            mean_logistics: 0.0,
+            mean_reserve_security: 0.0,
+            mean_task_coverage: 0.0,
             routing_balance: 0.0,
             history: Vec::new(),
             avg_history: Vec::new(),
@@ -375,10 +385,13 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
             append(
                 log_path,
                 &format!(
-                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
+                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} reserve {:.2} tasks {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
                     champ_score,
                     cq.robust_survival,
                     cq.security,
+                    cq.logistics,
+                    cq.reserve_security,
+                    cq.task_coverage,
                     cq.routing_entropy,
                     cq.expert_coverage,
                     BENCH_WORLDS,
@@ -495,6 +508,9 @@ impl Trainer {
         self.robust_survival = best_quality.robust_survival;
         self.mean_security = best_quality.security;
         self.fairness_margin = best_quality.robust_fairness;
+        self.mean_logistics = best_quality.logistics;
+        self.mean_reserve_security = best_quality.reserve_security;
+        self.mean_task_coverage = best_quality.task_coverage;
         self.routing_balance = best_quality.routing_entropy * best_quality.expert_coverage;
         let improvement_margin = self.best_ever.abs().max(1.0) * 0.002;
         if self.best_fitness > self.best_ever + improvement_margin {
@@ -872,6 +888,9 @@ impl QualityTotals {
         self.sum.settlement += score.settlement;
         self.sum.expansion += score.expansion;
         self.sum.cooperation += score.cooperation;
+        self.sum.logistics += score.logistics;
+        self.sum.reserve_security += score.reserve_security;
+        self.sum.task_coverage += score.task_coverage;
         self.sum.defense += score.defense;
         self.sum.combat += score.combat;
         self.robust_survival = self.robust_survival.min(score.survival);
@@ -898,6 +917,9 @@ impl QualityTotals {
             settlement: self.sum.settlement * inv,
             expansion: self.sum.expansion * inv,
             cooperation: self.sum.cooperation * inv,
+            logistics: self.sum.logistics * inv,
+            reserve_security: self.sum.reserve_security * inv,
+            task_coverage: self.sum.task_coverage * inv,
             defense: self.sum.defense * inv,
             combat: self.sum.combat * inv,
             routing_entropy,
@@ -1233,6 +1255,10 @@ pub fn benchmark_ai_quality(
         clan_cohort_survival,
         neutral_cohort_survival,
         fairness_delta,
+        robust_fairness_delta: quality.robust_fairness,
+        mean_logistics: quality.logistics,
+        mean_reserve_security: quality.reserve_security,
+        mean_task_coverage: quality.task_coverage,
         routing_entropy: quality.routing_entropy,
         expert_coverage: quality.expert_coverage,
         eligible: quality.eligible && fairness_delta >= -0.05,
@@ -1252,68 +1278,7 @@ fn quality_better(challenger: &QualityScore, reigning: &QualityScore) -> bool {
 /// cliffs) so the gradient is learnable; a wiped-out clan scores 0.
 #[cfg(test)]
 fn score_clan(w: &World, cid: i32) -> f32 {
-    match w.clan_by_id(cid) {
-        Some(c) => {
-            let pop = w.clan_population(cid) as f32;
-            let food = c.food as f32;
-            let terr = c.territory as f32;
-            let kills = c.stats.kills as f32;
-            let losses = c.stats.losses as f32;
-            let recruits = c.stats.recruits as f32;
-            let peak = c.stats.peak_pop as f32;
-            let alive_ticks = c.stats.alive_ticks.max(1) as f32;
-            let possible_ticks = (w.tick - c.stats.founded_tick).max(1) as f32;
-            let survival = (alive_ticks / possible_ticks).clamp(0.0, 1.0);
-            let avg_pop = c.stats.pop_tick_sum as f32 / alive_ticks;
-            let avg_food = c.stats.food_tick_sum as f32 / alive_ticks;
-            let avg_hunger = if c.stats.pop_tick_sum > 0 {
-                c.stats.hunger_tick_sum / c.stats.pop_tick_sum as f32
-            } else {
-                1.0
-            };
-            let reserve_per_cap = food / pop.max(1.0);
-            let fertile_cap = c.fertile_capacity;
-            // Fraction of member-time spent on the clan's own land: the direct
-            // measure of "settled village that uses its territory."
-            let settled_frac = if c.stats.pop_tick_sum > 0 {
-                c.stats.on_terr_tick_sum as f32 / c.stats.pop_tick_sum as f32
-            } else {
-                0.0
-            };
-            let group_multiplier = if pop >= 2.0 {
-                1.0 + (pop - 1.0).min(30.0) * 0.035
-            } else {
-                0.25
-            };
-            let survival_score = survival * 120.0;
-            let population_score = pop.powf(1.15) * 7.0 + avg_pop * 4.0 + peak * 2.0;
-            // Living ON your land beats merely claiming it — this is the village
-            // reward, and the biggest single term for a stable settled clan.
-            let settled_score = settled_frac * avg_pop * 8.0;
-            // Held productive land matters, but with diminishing returns so the
-            // optimum is "enough fertile land to feed the village," not grab-all.
-            let land_score = fertile_cap.sqrt() * 8.0 + terr.sqrt() * 2.0;
-            let reserve_score = reserve_per_cap.min(12.0) * 5.0 + avg_food.sqrt() * 2.0;
-            let cooperation_score = recruits * 5.0;
-            // Winning land/raids pays; losing warriors costs, but less than before
-            // (some losses are the price of taking a neighbour's valley).
-            let combat_score = kills * 1.2;
-            let hunger_penalty = avg_hunger * 40.0 + c.stats.starving_ticks as f32 * 0.06;
-            let loss_penalty = losses * 18.0;
-            ((survival_score
-                + population_score
-                + settled_score
-                + land_score
-                + reserve_score
-                + cooperation_score
-                + combat_score)
-                * group_multiplier
-                - hunger_penalty
-                - loss_penalty)
-                .max(0.0)
-        }
-        None => 0.0, // disbanded / wiped out
-    }
+    score_clan_quality(w, cid).fitness
 }
 
 #[cfg(test)]
@@ -1390,7 +1355,9 @@ mod tests {
         scores[0].security = 1.0;
         scores[1].settlement = 1.0;
         scores[1].expansion = 1.0;
-        scores[2].cooperation = 1.0;
+        scores[2].logistics = 1.0;
+        scores[2].reserve_security = 1.0;
+        scores[2].task_coverage = 1.0;
         scores[3].defense = 1.0;
         scores[4].combat = 1.0;
         trainer.finish_general(population, scores, 0.0);
@@ -1408,6 +1375,10 @@ mod tests {
         assert_eq!(a.worlds, 13);
         assert!((a.mean_fitness - b.mean_fitness).abs() < 1e-5);
         assert!((a.fairness_delta - b.fairness_delta).abs() < 1e-6);
+        assert!((a.robust_fairness_delta - b.robust_fairness_delta).abs() < 1e-6);
+        assert!((a.mean_logistics - b.mean_logistics).abs() < 1e-6);
+        assert!((a.mean_reserve_security - b.mean_reserve_security).abs() < 1e-6);
+        assert!((a.mean_task_coverage - b.mean_task_coverage).abs() < 1e-6);
         assert!((0.0..=1.0).contains(&a.routing_entropy));
         assert!((0.0..=1.0).contains(&a.expert_coverage));
         assert!(

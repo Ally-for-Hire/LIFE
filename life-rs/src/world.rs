@@ -65,6 +65,15 @@ const INITIAL_CLAIM_RADIUS: i32 = 3;
 const TERRITORY_PRUNE_INTERVAL: i32 = 200;
 const EXPAND_REACH: i32 = 30;
 const EMERGENCY_HUNGER: f32 = 0.78;
+const WORK_ASSIGNMENT_TICKS: i32 = CLAN_THINK_INTERVAL * 2;
+const FOREST_WOOD_CAP: u8 = 6;
+const WOOD_REGROW_INTERVAL: i32 = 360;
+const WOOD_REGROW_CHANCE: f32 = 0.08;
+const ROAD_BUILD_INTERVAL: i32 = 60;
+const ROAD_WOOD_COST: i32 = 2;
+const ROAD_MIN_TRAFFIC: u16 = 3;
+const RESERVE_FOOD_PER_MEMBER: i32 = 4;
+const STOCKPILE_FOOD_PER_MEMBER: i32 = 4;
 /// Above this hunger, an outsider will steal from foreign farmland to survive —
 /// which makes them a trespasser and triggers the owner's defense. Below it,
 /// a clan's crops feed only its own people (despotic exclusion).
@@ -237,6 +246,15 @@ impl World {
         for d in self.grid.depletion.iter_mut() {
             *d = 0;
         }
+        for r in self.grid.road.iter_mut() {
+            *r = 0;
+        }
+        for w in self.grid.wood.iter_mut() {
+            *w = 0;
+        }
+        for t in self.grid.traffic.iter_mut() {
+            *t = 0;
+        }
         for o in self.grid.owner.iter_mut() {
             *o = NO_OWNER;
         }
@@ -314,6 +332,7 @@ impl World {
             for i in 0..n {
                 self.grid.terrain[i] = terrain::PLAINS;
                 self.grid.fertility[i] = 180;
+                self.grid.wood[i] = 0;
             }
             return;
         }
@@ -352,6 +371,11 @@ impl World {
             };
             self.grid.terrain[i] = t;
             self.grid.fertility[i] = f;
+            self.grid.wood[i] = if t == terrain::FOREST {
+                FOREST_WOOD_CAP
+            } else {
+                0
+            };
         }
     }
 
@@ -385,19 +409,44 @@ impl World {
     }
 
     fn eat_from_stockpile(&mut self, e: &mut Entity, cidx: usize) -> bool {
-        if self.clans[cidx].food <= 0 {
-            return false;
-        }
         let Some((sx, sy)) = self.clans[cidx].stockpile else {
             return false;
         };
         if e.x != sx || e.y != sy {
             return false;
         }
-        self.clans[cidx].food -= 1;
+        if self.clans[cidx].food > 0 {
+            self.clans[cidx].food -= 1;
+        } else if self.clans[cidx].reserve_food > 0 {
+            self.clans[cidx].reserve_food -= 1;
+            self.clans[cidx].stats.reserve_released += 1;
+        } else {
+            return false;
+        }
         self.feed_entity(e);
         e.goal = Goal::Eating;
         true
+    }
+
+    /// Deliver food to the shared stockpile. Ordinary working food is filled
+    /// first; only the surplus above that floor enters the protected reserve.
+    fn deposit_food(&mut self, cidx: usize, amount: i32) {
+        if amount <= 0 {
+            return;
+        }
+        let pop = self.clan_roster_size(cidx);
+        let ordinary_floor = pop * STOCKPILE_FOOD_PER_MEMBER;
+        let reserve_cap = pop * RESERVE_FOOD_PER_MEMBER;
+        let ordinary_needed = (ordinary_floor - self.clans[cidx].food).max(0);
+        let to_ordinary = amount.min(ordinary_needed);
+        self.clans[cidx].food += to_ordinary;
+
+        let remaining = amount - to_ordinary;
+        let reserve_room = (reserve_cap - self.clans[cidx].reserve_food).max(0);
+        let to_reserve = remaining.min(reserve_room);
+        self.clans[cidx].reserve_food += to_reserve;
+        self.clans[cidx].stats.reserve_deposited += to_reserve as u32;
+        self.clans[cidx].food += remaining - to_reserve;
     }
 
     fn consume_pellet_at(&mut self, e: &mut Entity, carry: bool) -> bool {
@@ -466,10 +515,13 @@ impl World {
             max_health,
             is_leader,
             food: 0,
+            wood: 0,
             ticks_since_food: 0,
             hunger_threshold: threshold,
             goal: Goal::Wander,
             clan: -1,
+            work_role: ClanMode::Gather,
+            work_until: 0,
             last_food: None,
             attack_cooldown: 0,
             dead: false,
@@ -589,7 +641,10 @@ impl World {
             let fit = pop
                 + c.fertile_capacity * 0.6
                 + c.territory as f32 * 0.05
-                + c.stats.kills as f32 * 0.5;
+                + c.stats.kills as f32 * 0.5
+                + c.reserve_food.max(0) as f32 * 0.12
+                + c.stats.roads_built as f32 * 0.4
+                + c.stats.reserve_released as f32 * 0.15;
             pool.push((i, fit));
         }
         if pool.is_empty() {
@@ -882,6 +937,10 @@ impl World {
             .count()
     }
 
+    fn clan_roster_size(&self, clan_idx: usize) -> i32 {
+        (1 + self.clans[clan_idx].members.len()) as i32
+    }
+
     /// Population a clan's land can support — keyed to *productive* (fertile)
     /// territory, not raw tile count (Resource Dispersion Hypothesis). A fertile
     /// valley feeds a real village; scrubland supports only a few, which pushes
@@ -971,6 +1030,61 @@ impl World {
         best
     }
 
+    fn nearest_wood(&self, x: i32, y: i32, radius: i32, clan: i32) -> Option<(i32, i32)> {
+        let g = &self.grid;
+        let mut best = None;
+        let mut best_d = i32::MAX;
+        for yy in (y - radius).max(0)..=(y + radius).min(g.size - 1) {
+            for xx in (x - radius).max(0)..=(x + radius).min(g.size - 1) {
+                let i = g.idx(xx, yy);
+                if g.wood[i] == 0 {
+                    continue;
+                }
+                let owner = g.owner[i];
+                if owner != NO_OWNER && owner != clan {
+                    continue;
+                }
+                let dx = xx - x;
+                let dy = yy - y;
+                let d = dx * dx + dy * dy;
+                if d < best_d {
+                    best_d = d;
+                    best = Some((xx, yy));
+                }
+            }
+        }
+        best
+    }
+
+    /// Local public-good signals for the unchanged reserved brain inputs.
+    fn logistics_signals(&self, clan_idx: usize) -> (f32, f32) {
+        let Some((sx, sy)) = self.clans[clan_idx].stockpile else {
+            return (0.0, 0.0);
+        };
+        let id = self.clans[clan_idx].id;
+        let r = self.params.home_range.max(1);
+        let mut owned = 0u32;
+        let mut roads = 0u32;
+        let mut wood = 0u32;
+        for y in (sy - r).max(0)..=(sy + r).min(self.grid.size - 1) {
+            for x in (sx - r).max(0)..=(sx + r).min(self.grid.size - 1) {
+                let i = self.grid.idx(x, y);
+                let owner = self.grid.owner[i];
+                if owner == id {
+                    owned += 1;
+                    roads += u32::from(self.grid.road[i] > 0);
+                }
+                if owner == NO_OWNER || owner == id {
+                    wood += self.grid.wood[i] as u32;
+                }
+            }
+        }
+        let road_access = roads as f32 / owned.max(1) as f32;
+        let pop = self.clan_roster_size(clan_idx).max(1) as f32;
+        let available_wood = (wood as f32 / (pop * FOREST_WOOD_CAP as f32 * 3.0)).min(1.0);
+        (road_access.min(1.0), available_wood)
+    }
+
     pub fn entity_near(&self, x: i32, y: i32, radius: i32) -> Option<u32> {
         let mut best = None;
         let mut best_d = (radius * radius) + 1;
@@ -1033,6 +1147,7 @@ impl World {
         let oi = self.grid.idx(e.x, e.y);
         self.occupied[oi] = self.occupied[oi].saturating_sub(1);
         self.occupied[ni] += 1;
+        self.grid.traffic[ni] = self.grid.traffic[ni].saturating_add(1);
         e.move_budget -= c;
         e.x = nx;
         e.y = ny;
@@ -1102,6 +1217,7 @@ impl World {
         // what's left — so cultivated territory out-produces the wilderness.
         self.grow_farms();
         self.update_trees();
+        self.regrow_wood();
         self.maybe_disaster();
         self.clan_think();
 
@@ -1111,6 +1227,7 @@ impl World {
             self.update_entity(e);
         }
         self.entities = entities;
+        self.build_roads();
 
         self.resolve_recruitment();
         self.resolve_combat();
@@ -1144,6 +1261,7 @@ impl World {
         let mut hunger_sum = vec![0f32; self.clans.len()];
         let mut starving = vec![0u32; self.clans.len()];
         let mut on_terr = vec![0u32; self.clans.len()];
+        let mut roles = vec![[0u32; N_MODES]; self.clans.len()];
         for e in &self.entities {
             if e.dead || e.clan < 0 {
                 continue;
@@ -1158,6 +1276,7 @@ impl World {
                 if self.grid.owner[self.grid.idx(e.x, e.y)] == e.clan {
                     on_terr[idx] += 1;
                 }
+                roles[idx][e.work_role.index()] += 1;
             }
         }
         for i in 0..self.clans.len() {
@@ -1169,8 +1288,12 @@ impl World {
             self.clans[i].stats.pop_tick_sum += p as u64;
             self.clans[i].stats.hunger_tick_sum += hunger_sum[i];
             self.clans[i].stats.starving_ticks += starving[i];
-            self.clans[i].stats.food_tick_sum += self.clans[i].food.max(0) as u64;
+            self.clans[i].stats.food_tick_sum +=
+                (self.clans[i].food.max(0) + self.clans[i].reserve_food.max(0)) as u64;
             self.clans[i].stats.on_terr_tick_sum += on_terr[i] as u64;
+            for role in 0..N_MODES {
+                self.clans[i].stats.role_tick_sum[role] += roles[i][role] as u64;
+            }
             self.clans[i].stats.peak_pop = self.clans[i].stats.peak_pop.max(p);
         }
     }
@@ -1442,7 +1565,13 @@ impl World {
             trespasser_pos: Option<(i32, i32)>,
             expand_target: Option<(i32, i32)>,
             pop: u32,
-            decided: Option<(ClanMode, f32, [f32; N_OUT], [f32; N_EXPERTS])>,
+            decided: Option<(
+                ClanMode,
+                f32,
+                [f32; N_OUT],
+                [f32; N_EXPERTS],
+                [bool; N_MODES],
+            )>,
         }
         let mut decs: Vec<Dec> = Vec::with_capacity(n);
 
@@ -1537,7 +1666,7 @@ impl World {
 
             let decided = if decide {
                 let size = pop[idx] as f32;
-                let food = self.clans[idx].food as f32;
+                let food = (self.clans[idx].food + self.clans[idx].reserve_food) as f32;
                 let terr = self.clans[idx].territory as f32;
                 let avg_hunger = if pop[idx] > 0 {
                     hunger_sum[idx] / pop[idx] as f32
@@ -1562,6 +1691,7 @@ impl World {
                 let max_pellets =
                     (cells * self.params.max_pellet_fraction.clamp(0.0, 1.0)).max(1.0);
                 let world_food = (self.pellet_total as f32 / max_pellets).min(1.0);
+                let (road_access, available_wood) = self.logistics_signals(idx);
 
                 // The situation vector the master + sub-minds read. Normalised,
                 // information-rich, and free of behavioural prescriptions — what
@@ -1585,22 +1715,22 @@ impl World {
                     (self.season_factor() - 1.0) / self.params.season_amp.max(0.01), // 15 season phase [-1,1]
                     // --- RESERVED future-feature inputs (read 0.0 until the world
                     //     wires them up; the brain's size never changes) ---
-                    0.0, // 16 roads / logistics access near home
-                    0.0, // 17 buildings / settlement development level
-                    0.0, // 18 tech / research level
-                    0.0, // 19 military strength / equipment level
-                    0.0, // 20 second resource (wood/stone) stored per head
-                    0.0, // 21 second resource availability nearby/owned
-                    0.0, // 22 diplomacy: relation with nearest clan (0 enemy .. 1 ally)
-                    0.0, // 23 number of allies / trade partners
-                    0.0, // 24 active trade inflow / volume
-                    0.0, // 25 day/night phase (distinct from season)
+                    road_access, // 16 roads / logistics access near home
+                    0.0,         // 17 buildings / settlement development level
+                    0.0,         // 18 tech / research level
+                    0.0,         // 19 military strength / equipment level
+                    (self.clans[idx].wood as f32 / (size * 3.0).max(1.0)).min(1.0), // 20 stored wood / head
+                    available_wood, // 21 reachable forest wood
+                    0.0,            // 22 diplomacy: relation with nearest clan (0 enemy .. 1 ally)
+                    0.0,            // 23 number of allies / trade partners
+                    0.0,            // 24 active trade inflow / volume
+                    0.0,            // 25 day/night phase (distinct from season)
                     self.clans[idx].soil_depletion.min(1.0), // 26 soil depletion of owned tiles
                     self.disaster_level, // 27 active disaster/event severity
-                    0.0, // 28 average member morale / health
-                    0.0, // 29 water / coast / river access of territory
-                    0.0, // 30 spare
-                    1.0, // 31 bias
+                    0.0,            // 28 average member morale / health
+                    0.0,            // 29 water / coast / river access of territory
+                    0.0,            // 30 spare
+                    1.0,            // 31 bias
                 ];
 
                 // The master routes; the sub-minds propose. We take the blended
@@ -1611,18 +1741,18 @@ impl World {
                 let (out, gate_w) = self.clans[idx].brain.evaluate(&inputs);
                 let mut order: Vec<usize> = (0..N_MODES).collect();
                 order.sort_by(|&a, &b| out[b].partial_cmp(&out[a]).unwrap());
+                let feasible = [
+                    ntarget.is_some() && self.clan_can_add_member(idx),
+                    frontier_exists,
+                    true,
+                    !grace && enemy.is_some(),
+                    true,
+                    true,
+                ];
                 let mut chosen = ClanMode::Gather;
                 for &oi in &order {
                     let m = ClanMode::from_index(oi);
-                    let feasible = match m {
-                        ClanMode::Recruit => ntarget.is_some() && self.clan_can_add_member(idx),
-                        ClanMode::Expand => frontier_exists,
-                        ClanMode::Attack => !grace && enemy.is_some(),
-                        ClanMode::Defend => true,
-                        ClanMode::Scout => true,
-                        ClanMode::Gather => true,
-                    };
-                    if feasible {
+                    if feasible[oi] {
                         chosen = m;
                         break;
                     }
@@ -1633,7 +1763,7 @@ impl World {
                     // march on the richest target: a hoard if one is in reach.
                     enemy = enemy_stockpile.or(enemy);
                 }
-                Some((chosen, aggression, out, gate_w))
+                Some((chosen, aggression, out, gate_w, feasible))
             } else {
                 None
             };
@@ -1652,21 +1782,166 @@ impl World {
             });
         }
 
+        let mut workforce_updates = Vec::new();
         for d in decs {
-            let c = &mut self.clans[d.idx];
-            c.enemy_pos = d.enemy_pos;
-            c.recruit_target = d.recruit_target;
-            c.neutral_pos = d.neutral_pos;
-            c.trespasser_pos = d.trespasser_pos;
-            c.expand_target = d.expand_target;
-            c.stats.peak_pop = c.stats.peak_pop.max(d.pop);
-            if let Some((mode, aggr, out, gate_w)) = d.decided {
-                c.mode = mode;
-                c.aggression = aggr;
-                c.brain.last_out = out;
-                c.brain.last_gate = gate_w;
+            {
+                let c = &mut self.clans[d.idx];
+                c.enemy_pos = d.enemy_pos;
+                c.recruit_target = d.recruit_target;
+                c.neutral_pos = d.neutral_pos;
+                c.trespasser_pos = d.trespasser_pos;
+                c.expand_target = d.expand_target;
+                c.stats.peak_pop = c.stats.peak_pop.max(d.pop);
+                if let Some((mode, aggr, out, gate_w, feasible)) = d.decided {
+                    c.mode = mode;
+                    c.aggression = aggr;
+                    c.brain.last_out = out;
+                    c.brain.last_gate = gate_w;
+                    workforce_updates.push((d.idx, mode, out, feasible));
+                }
             }
         }
+        for (idx, mode, out, feasible) in workforce_updates {
+            self.rebalance_workforce(idx, mode, &out, &feasible);
+        }
+    }
+
+    /// Convert the blended utilities into deterministic integer jobs while
+    /// preserving existing assignments whenever their quota still has room.
+    fn rebalance_workforce(
+        &mut self,
+        clan_idx: usize,
+        headline: ClanMode,
+        utilities: &[f32; N_OUT],
+        feasible: &[bool; N_MODES],
+    ) {
+        let clan_id = self.clans[clan_idx].id;
+        let leader_id = self.clans[clan_idx].leader_id;
+        let mut followers: Vec<usize> = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.clan == clan_id && !e.dead && e.id != leader_id)
+            .map(|(i, _)| i)
+            .collect();
+        followers.sort_by_key(|&i| self.entities[i].id);
+
+        let mut target = [0u16; N_MODES];
+        let follower_count = followers.len();
+        if follower_count > 0 {
+            let gather_core = ((follower_count + 3) / 4).max(1).min(follower_count);
+            target[ClanMode::Gather.index()] = gather_core as u16;
+            let defend_core = usize::from(follower_count > gather_core);
+            target[ClanMode::Defend.index()] = defend_core as u16;
+            let remaining_slots = follower_count - gather_core - defend_core;
+            let worker_modes = [
+                ClanMode::Expand,
+                ClanMode::Gather,
+                ClanMode::Attack,
+                ClanMode::Defend,
+            ];
+            let weight_sum: f32 = worker_modes
+                .iter()
+                .filter(|m| feasible[m.index()])
+                .map(|m| utilities[m.index()].max(0.0))
+                .sum();
+            if remaining_slots > 0 && weight_sum > 0.0 {
+                let mut used = 0usize;
+                let mut fractions = Vec::new();
+                for mode in worker_modes {
+                    if !feasible[mode.index()] {
+                        continue;
+                    }
+                    let exact =
+                        remaining_slots as f32 * utilities[mode.index()].max(0.0) / weight_sum;
+                    let whole = exact.floor() as usize;
+                    target[mode.index()] += whole as u16;
+                    used += whole;
+                    fractions.push((exact - whole as f32, mode.index()));
+                }
+                fractions.sort_by(|a, b| {
+                    b.0.partial_cmp(&a.0)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                        .then_with(|| a.1.cmp(&b.1))
+                });
+                for &(_, role) in fractions.iter().take(remaining_slots.saturating_sub(used)) {
+                    target[role] += 1;
+                }
+            } else {
+                target[ClanMode::Gather.index()] += remaining_slots as u16;
+            }
+        }
+
+        let leader_idx = self
+            .entities
+            .iter()
+            .position(|e| e.id == leader_id && e.clan == clan_id && !e.dead);
+        if leader_idx.is_some() {
+            target[headline.index()] += 1;
+        }
+
+        let mut remaining = target;
+        let mut assignments: Vec<(usize, ClanMode)> = Vec::with_capacity(followers.len() + 1);
+        if let Some(i) = leader_idx {
+            assignments.push((i, headline));
+            remaining[headline.index()] = remaining[headline.index()].saturating_sub(1);
+        }
+
+        for locked_pass in [true, false] {
+            for &i in &followers {
+                if assignments.iter().any(|(assigned, _)| *assigned == i) {
+                    continue;
+                }
+                let locked = self.entities[i].work_until > self.tick;
+                if locked != locked_pass {
+                    continue;
+                }
+                let role = self.entities[i].work_role;
+                if matches!(role, ClanMode::Recruit | ClanMode::Scout)
+                    || !feasible[role.index()]
+                    || remaining[role.index()] == 0
+                {
+                    continue;
+                }
+                assignments.push((i, role));
+                remaining[role.index()] -= 1;
+            }
+        }
+
+        let mut role_order = [
+            ClanMode::Expand,
+            ClanMode::Gather,
+            ClanMode::Attack,
+            ClanMode::Defend,
+        ];
+        role_order.sort_by(|a, b| {
+            utilities[b.index()]
+                .partial_cmp(&utilities[a.index()])
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.index().cmp(&b.index()))
+        });
+        for i in followers {
+            if assignments.iter().any(|(assigned, _)| *assigned == i) {
+                continue;
+            }
+            let role = role_order
+                .iter()
+                .copied()
+                .find(|m| remaining[m.index()] > 0)
+                .unwrap_or(ClanMode::Gather);
+            remaining[role.index()] = remaining[role.index()].saturating_sub(1);
+            assignments.push((i, role));
+        }
+
+        let mut actual = [0u16; N_MODES];
+        for (i, role) in assignments {
+            actual[role.index()] += 1;
+            if self.entities[i].work_role != role {
+                self.entities[i].work_role = role;
+                self.entities[i].work_until = self.tick + WORK_ASSIGNMENT_TICKS;
+            }
+        }
+        self.clans[clan_idx].workforce = actual;
     }
 
     /// Best unowned passable tile on the clan's frontier — the next claim.
@@ -1775,7 +2050,7 @@ impl World {
                 self.consume_pellet_at(e, false);
                 return;
             }
-            if self.clans[cidx].food > 0 {
+            if self.clans[cidx].food > 0 || self.clans[cidx].reserve_food > 0 {
                 if let Some((sx, sy)) = self.clans[cidx].stockpile {
                     let d = (e.x - sx).abs().max((e.y - sy).abs());
                     if !urgent || d <= self.params.vision_radius * 2 {
@@ -1809,7 +2084,7 @@ impl World {
             }
         }
 
-        match self.clans[cidx].mode {
+        match e.work_role {
             ClanMode::Attack => {
                 // Only healthy members march as the war party; the rest stay and
                 // work the land, so a clan at war is still a living village, not
@@ -1826,36 +2101,33 @@ impl World {
                 self.gather(e, cidx);
             }
             ClanMode::Recruit => {
-                if let Some((tx, ty)) = self.clans[cidx].neutral_pos {
-                    e.goal = Goal::Recruiting;
-                    self.move_toward(e, tx, ty, true);
-                    return;
+                if e.is_leader {
+                    if let Some((tx, ty)) = self.clans[cidx].neutral_pos {
+                        e.goal = Goal::Recruiting;
+                        self.move_toward(e, tx, ty, true);
+                        return;
+                    }
                 }
                 self.gather(e, cidx);
             }
             ClanMode::Defend => self.defend(e, cidx),
             ClanMode::Expand => {
-                if !e.is_leader {
-                    if let Some((tx, ty)) = self.clans[cidx].expand_target {
-                        e.goal = Goal::Claiming;
-                        self.move_toward(e, tx, ty, true);
-                        let d = (e.x - tx).abs().max((e.y - ty).abs());
-                        if d <= 1 {
-                            let interval = self.params.claim_interval.max(1);
-                            if self.tick - self.clans[cidx].last_claim_tick >= interval {
-                                let r = self.params.expand_claim_radius.max(1);
-                                self.claim_area(cidx, tx, ty, r);
-                                self.clans[cidx].last_claim_tick = self.tick;
-                                // claimed: drop this target so the worker falls
-                                // back to working the land until the next frontier
-                                // is picked at the upcoming refresh.
-                                self.clans[cidx].expand_target = None;
-                            }
+                if let Some((tx, ty)) = self.clans[cidx].expand_target {
+                    e.goal = Goal::Claiming;
+                    self.move_toward(e, tx, ty, true);
+                    let d = (e.x - tx).abs().max((e.y - ty).abs());
+                    if d <= 1 {
+                        let interval = self.params.claim_interval.max(1);
+                        if self.tick - self.clans[cidx].last_claim_tick >= interval {
+                            let r = self.params.expand_claim_radius.max(1);
+                            self.claim_area(cidx, tx, ty, r);
+                            self.clans[cidx].last_claim_tick = self.tick;
+                            self.clans[cidx].expand_target = None;
                         }
-                        return;
                     }
+                    return;
                 }
-                self.gather(e, cidx); // leader (and idle workers) keep gathering
+                self.gather(e, cidx);
             }
             ClanMode::Scout => {
                 if e.is_leader {
@@ -1865,8 +2137,76 @@ impl World {
                     self.gather(e, cidx);
                 }
             }
-            ClanMode::Gather => self.gather(e, cidx),
+            ClanMode::Gather => {
+                if self.should_gather_wood(e, cidx) {
+                    self.gather_wood(e, cidx);
+                } else {
+                    self.gather(e, cidx);
+                }
+            }
         }
+    }
+
+    fn should_gather_wood(&self, e: &Entity, cidx: usize) -> bool {
+        if e.wood > 0 {
+            return true;
+        }
+        let pop = self.clan_roster_size(cidx);
+        let food_safe = self.clans[cidx].food >= pop * STOCKPILE_FOOD_PER_MEMBER;
+        let road_workers = self.clans[cidx].workforce[ClanMode::Expand.index()] as i32;
+        let wood_target = ROAD_WOOD_COST * (road_workers.max(1) + 2);
+        food_safe && road_workers > 0 && self.clans[cidx].wood < wood_target
+    }
+
+    fn gather_wood(&mut self, e: &mut Entity, cidx: usize) {
+        let limit = self.params.carry_limit.max(1);
+        let stockpile = self.clans[cidx].stockpile;
+        if let Some((sx, sy)) = stockpile {
+            let nearby_wood = self.nearest_wood(e.x, e.y, self.params.vision_radius, e.clan);
+            if e.wood >= limit || (e.wood > 0 && nearby_wood.is_none()) {
+                e.goal = Goal::HaulingWood;
+                self.move_toward(e, sx, sy, true);
+                if e.x == sx && e.y == sy {
+                    let delivered = e.wood;
+                    self.clans[cidx].wood += delivered;
+                    self.clans[cidx].stats.wood_delivered += delivered as u32;
+                    e.wood = 0;
+                }
+                return;
+            }
+            if (e.x - sx).abs().max((e.y - sy).abs()) > self.params.home_range.max(1) {
+                e.goal = Goal::GatheringWood;
+                self.move_toward(e, sx, sy, true);
+                return;
+            }
+        }
+        let radius = self.params.home_range.max(self.params.vision_radius).max(1);
+        if let Some((wx, wy)) = self.nearest_wood(e.x, e.y, radius, e.clan) {
+            e.goal = Goal::GatheringWood;
+            self.move_toward(e, wx, wy, true);
+            if e.x == wx && e.y == wy {
+                let i = self.grid.idx(wx, wy);
+                if self.grid.wood[i] > 0 {
+                    self.grid.wood[i] -= 1;
+                    e.wood += 1;
+                }
+            }
+            return;
+        }
+        if e.wood > 0 {
+            if let Some((sx, sy)) = stockpile {
+                e.goal = Goal::HaulingWood;
+                self.move_toward(e, sx, sy, true);
+                if e.x == sx && e.y == sy {
+                    let delivered = e.wood;
+                    self.clans[cidx].wood += delivered;
+                    self.clans[cidx].stats.wood_delivered += delivered as u32;
+                    e.wood = 0;
+                }
+                return;
+            }
+        }
+        self.gather(e, cidx);
     }
 
     fn forage(&mut self, e: &mut Entity) {
@@ -1921,7 +2261,7 @@ impl World {
                 e.goal = Goal::Hauling;
                 self.move_toward(e, sx, sy, true);
                 if e.x == sx && e.y == sy {
-                    self.clans[cidx].food += e.food;
+                    self.deposit_food(cidx, e.food);
                     e.food = 0;
                 }
                 return;
@@ -1990,7 +2330,8 @@ impl World {
     fn resolve_recruitment(&mut self) {
         let radius = self.params.recruit_radius;
         for ci in 0..self.clans.len() {
-            if self.clans[ci].disbanded || self.clans[ci].mode != ClanMode::Recruit {
+            if self.clans[ci].disbanded || self.clans[ci].workforce[ClanMode::Recruit.index()] == 0
+            {
                 continue;
             }
             if !self.clan_can_add_member(ci) {
@@ -2012,7 +2353,10 @@ impl World {
             }
             let id = self.clans[ci].id;
             let near_member = self.entities.iter().any(|e| {
-                e.clan == id && !e.dead && (e.x - tx).abs().max((e.y - ty).abs()) <= radius
+                e.clan == id
+                    && !e.dead
+                    && e.work_role == ClanMode::Recruit
+                    && (e.x - tx).abs().max((e.y - ty).abs()) <= radius
             });
             if near_member {
                 if !self.clan_can_add_member(ci) {
@@ -2116,10 +2460,7 @@ impl World {
             // A clan ordered to Attack strikes enemy clans wherever it meets
             // them (it's on campaign), not only on its own soil — this is what
             // lets a land-hungry clan press into a neighbour's territory.
-            let on_campaign = !grace
-                && self
-                    .clan_index(ec)
-                    .map_or(false, |ci| self.clans[ci].mode == ClanMode::Attack);
+            let on_campaign = !grace && self.entities[i].work_role == ClanMode::Attack;
             let mut found = None;
             'search: for dy in -1..=1 {
                 for dx in -1..=1 {
@@ -2238,6 +2579,78 @@ impl World {
             if let Some(mi) = self.entity_index(mid) {
                 self.entities[mi].clan = -1;
             }
+        }
+    }
+
+    fn regrow_wood(&mut self) {
+        if self.tick % WOOD_REGROW_INTERVAL != 0 {
+            return;
+        }
+        for i in 0..self.grid.wood.len() {
+            if self.grid.terrain[i] == terrain::FOREST
+                && self.grid.wood[i] < FOREST_WOOD_CAP
+                && self.rng.chance(WOOD_REGROW_CHANCE)
+            {
+                self.grid.wood[i] += 1;
+            }
+        }
+    }
+
+    /// Expand workers turn stored wood into roads on the clan's busiest owned
+    /// cells. Traffic decays after each construction pass, keeping placement
+    /// responsive to recent hauling and reinforcement routes.
+    fn build_roads(&mut self) {
+        if self.tick % ROAD_BUILD_INTERVAL != 0 {
+            return;
+        }
+        let mut clan_by_id = HashMap::new();
+        for (idx, clan) in self.clans.iter().enumerate() {
+            if !clan.disbanded
+                && clan.wood >= ROAD_WOOD_COST
+                && clan.workforce[ClanMode::Expand.index()] > 0
+            {
+                clan_by_id.insert(clan.id, idx);
+            }
+        }
+        let mut best: Vec<Option<(u16, usize)>> = vec![None; self.clans.len()];
+        for i in 0..self.grid.owner.len() {
+            if self.grid.road[i] > 0 || self.grid.traffic[i] < ROAD_MIN_TRAFFIC {
+                continue;
+            }
+            let Some(&ci) = clan_by_id.get(&self.grid.owner[i]) else {
+                continue;
+            };
+            let traffic = self.grid.traffic[i];
+            if best[ci].map_or(true, |(score, old_i)| {
+                traffic > score || (traffic == score && i < old_i)
+            }) {
+                best[ci] = Some((traffic, i));
+            }
+        }
+        for (ci, candidate) in best.into_iter().enumerate() {
+            let Some((_, i)) = candidate else {
+                continue;
+            };
+            if self.clans[ci].wood < ROAD_WOOD_COST || self.grid.road[i] > 0 {
+                continue;
+            }
+            self.clans[ci].wood -= ROAD_WOOD_COST;
+            self.clans[ci].stats.roads_built += 1;
+            self.grid.road[i] = 1;
+            let clan_id = self.clans[ci].id;
+            let x = i as i32 % self.grid.size;
+            let y = i as i32 / self.grid.size;
+            if let Some(builder) = self
+                .entities
+                .iter_mut()
+                .filter(|e| e.clan == clan_id && !e.dead && e.work_role == ClanMode::Expand)
+                .min_by_key(|e| (e.x - x).abs().max((e.y - y).abs()))
+            {
+                builder.goal = Goal::BuildingRoad;
+            }
+        }
+        for traffic in self.grid.traffic.iter_mut() {
+            *traffic /= 2;
         }
     }
 
@@ -2480,5 +2893,108 @@ mod tests {
         // the stockpile tile stays owned
         let si = w.grid.idx(sx, sy);
         assert_eq!(w.grid.owner[si], id, "base stays owned");
+    }
+
+    #[test]
+    fn workforce_is_deterministic_sticky_and_keeps_special_roles_on_leader() {
+        let mut w = World::new(60, 17);
+        w.populate(8, 8, 1);
+        let ci = 0;
+        let utilities = [0.95, 0.8, 0.75, 0.65, 0.55, 0.45, 0.2];
+        let feasible = [true; N_MODES];
+        w.tick = CLAN_THINK_INTERVAL;
+        w.rebalance_workforce(ci, ClanMode::Recruit, &utilities, &feasible);
+
+        let id = w.clans[ci].id;
+        let leader_id = w.clans[ci].leader_id;
+        let assigned: Vec<(u32, ClanMode)> = w
+            .entities
+            .iter()
+            .filter(|e| e.clan == id && !e.dead)
+            .map(|e| (e.id, e.work_role))
+            .collect();
+        assert_eq!(
+            assigned.len(),
+            w.clans[ci].workforce.iter().map(|&n| n as usize).sum()
+        );
+        assert!(w.clans[ci].workforce[ClanMode::Gather.index()] >= 1);
+        assert!(w.clans[ci].workforce[ClanMode::Defend.index()] >= 1);
+        for e in w.entities.iter().filter(|e| e.clan == id && !e.dead) {
+            if matches!(e.work_role, ClanMode::Recruit | ClanMode::Scout) {
+                assert_eq!(e.id, leader_id, "special roles must stay leader-only");
+            }
+        }
+
+        w.rebalance_workforce(ci, ClanMode::Recruit, &utilities, &feasible);
+        let reassigned: Vec<(u32, ClanMode)> = w
+            .entities
+            .iter()
+            .filter(|e| e.clan == id && !e.dead)
+            .map(|e| (e.id, e.work_role))
+            .collect();
+        assert_eq!(
+            assigned, reassigned,
+            "unchanged quotas should preserve jobs"
+        );
+    }
+
+    #[test]
+    fn reserve_only_takes_surplus_and_releases_when_working_food_is_empty() {
+        let mut w = World::new(50, 23);
+        w.populate(0, 0, 1);
+        let ci = 0;
+        let floor = w.clan_roster_size(ci) * STOCKPILE_FOOD_PER_MEMBER;
+        w.clans[ci].food = floor;
+        w.deposit_food(ci, 5);
+        assert_eq!(w.clans[ci].food, floor);
+        assert_eq!(w.clans[ci].reserve_food, 5);
+
+        w.clans[ci].food = 0;
+        w.clans[ci].reserve_food = 1;
+        let leader_id = w.clans[ci].leader_id;
+        let ei = w.entity_index(leader_id).unwrap();
+        let mut leader = w.entities.remove(ei);
+        (leader.x, leader.y) = w.clans[ci].stockpile.unwrap();
+        assert!(w.eat_from_stockpile(&mut leader, ci));
+        w.entities.insert(ei, leader);
+        assert_eq!(w.clans[ci].reserve_food, 0);
+        assert_eq!(w.clans[ci].stats.reserve_released, 1);
+    }
+
+    #[test]
+    fn forest_wood_resets_and_busy_owned_tiles_become_roads() {
+        let mut w = World::new(80, 31);
+        w.populate(0, 0, 1);
+        let forest: Vec<usize> = w
+            .grid
+            .terrain
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &t)| (t == terrain::FOREST).then_some(i))
+            .collect();
+        assert!(!forest.is_empty(), "seeded terrain should contain forest");
+        assert!(forest.iter().all(|&i| w.grid.wood[i] == FOREST_WOOD_CAP));
+
+        let ci = 0;
+        let id = w.clans[ci].id;
+        let road_i = w
+            .grid
+            .owner
+            .iter()
+            .position(|&owner| owner == id)
+            .expect("founding territory");
+        w.grid.traffic[road_i] = ROAD_MIN_TRAFFIC + 5;
+        w.clans[ci].wood = ROAD_WOOD_COST;
+        w.clans[ci].workforce[ClanMode::Expand.index()] = 1;
+        w.tick = ROAD_BUILD_INTERVAL;
+        w.build_roads();
+        assert_eq!(w.grid.road[road_i], 1);
+        assert_eq!(w.clans[ci].wood, 0);
+        assert_eq!(w.clans[ci].stats.roads_built, 1);
+
+        w.clear();
+        assert!(w.grid.road.iter().all(|&v| v == 0));
+        assert!(w.grid.wood.iter().all(|&v| v == 0));
+        assert!(w.grid.traffic.iter().all(|&v| v == 0));
     }
 }

@@ -37,11 +37,13 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
 - **Survival-gated quality diversity** — deterministic clan-vs-neutral and
   routing-health benchmarks plus persistent survivor, builder, cooperator,
   defender, and raider elites.
+- **Community Logistics V1** — deterministic sticky workforce quotas let one
+  village gather, expand, defend, recruit, attack, and scout simultaneously;
+  renewable forest wood feeds shared stockpiles, travelled owned routes become
+  wood-built roads, and emergency food reserves protect clans through shocks.
 
 ## Next (civ layers)
 
-- **Roads** — buildable road tiles that lower movement cost (hook already wired)
-  and later carry trade/logistics.
 - **Buildings + tech tree** — houses, granaries, walls, barracks, markets with
   footprints, HP, and production; new brain build/research actions and sub-minds.
 - **Trade & diplomacy** — friendly clans exchange food/resources; a second

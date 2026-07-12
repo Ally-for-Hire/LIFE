@@ -4,7 +4,7 @@
 //! reads those (plus the cached target positions computed in the clan pre-pass),
 //! so no entity ever has to scan the world during its own update.
 
-use crate::brain::Brain;
+use crate::brain::{Brain, N_MODES};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ClanMode {
@@ -25,6 +25,16 @@ impl ClanMode {
             3 => ClanMode::Attack,
             4 => ClanMode::Defend,
             _ => ClanMode::Scout,
+        }
+    }
+    pub fn index(self) -> usize {
+        match self {
+            ClanMode::Recruit => 0,
+            ClanMode::Expand => 1,
+            ClanMode::Gather => 2,
+            ClanMode::Attack => 3,
+            ClanMode::Defend => 4,
+            ClanMode::Scout => 5,
         }
     }
     pub fn label(&self) -> &'static str {
@@ -55,6 +65,13 @@ pub struct ClanStats {
     /// clan actually *settles and works* its territory vs roams. Drives fitness
     /// toward villages that use their land, not nomads that just claim it.
     pub on_terr_tick_sum: u64,
+    /// Material delivered and public works completed by the community.
+    pub wood_delivered: u32,
+    pub roads_built: u32,
+    pub reserve_deposited: u32,
+    pub reserve_released: u32,
+    /// Member-ticks by assigned role (output order from `Brain`).
+    pub role_tick_sum: [u64; N_MODES],
 }
 
 pub struct Clan {
@@ -65,6 +82,10 @@ pub struct Clan {
     pub brain: Brain,
     pub stockpile: Option<(i32, i32)>,
     pub food: i32,
+    /// Forest wood delivered to the shared stockpile.
+    pub wood: i32,
+    /// Food protected from ordinary spending and released automatically in need.
+    pub reserve_food: i32,
     pub territory: u32,
     /// Sum of (fertility/255) over owned tiles — the *productive* size of the
     /// territory (Resource Dispersion Hypothesis). Drives the population cap, so
@@ -76,6 +97,8 @@ pub struct Clan {
     pub soil_depletion: f32,
     pub aggression: f32,
     pub mode: ClanMode,
+    /// Current deterministic workforce counts (output order from `Brain`).
+    pub workforce: [u16; N_MODES],
     // cached targets from the pre-pass, read during entity updates
     pub enemy_pos: Option<(i32, i32)>,
     pub recruit_target: Option<u32>,
@@ -100,11 +123,14 @@ impl Clan {
             brain,
             stockpile: None,
             food: 0,
+            wood: 0,
+            reserve_food: 0,
             territory: 0,
             fertile_capacity: 0.0,
             soil_depletion: 0.0,
             aggression: 0.0,
             mode: ClanMode::Gather,
+            workforce: [0; N_MODES],
             enemy_pos: None,
             recruit_target: None,
             neutral_pos: None,

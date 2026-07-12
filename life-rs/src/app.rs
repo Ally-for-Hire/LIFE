@@ -330,6 +330,22 @@ impl LifeApp {
                 }
             }
         }
+        // Community logistics overlays. Wood remains visibly tied to forest
+        // terrain; roads sit above terrain/territory so their shared benefit is
+        // legible even at low zoom.
+        for i in 0..n {
+            if g.wood[i] > 0 {
+                let abundance = (g.wood[i] as f32 / 16.0).clamp(0.2, 1.0);
+                px[i] = blend(
+                    px[i],
+                    egui::Color32::from_rgb(158, 104, 58),
+                    0.30 + abundance * 0.35,
+                );
+            }
+            if g.road[i] > 0 {
+                px[i] = egui::Color32::from_rgb(184, 154, 102);
+            }
+        }
         // pellets
         for i in 0..n {
             if g.pellet[i] > 0 {
@@ -595,6 +611,12 @@ impl eframe::App for LifeApp {
                         legend_row(ui, egui::Color32::from_rgb(222, 92, 92), "starving");
                         legend_row(ui, egui::Color32::from_rgb(64, 168, 96), "food (pellet)");
                         legend_row(ui, egui::Color32::from_rgb(54, 150, 80), "tree");
+                        legend_row(
+                            ui,
+                            egui::Color32::from_rgb(158, 104, 58),
+                            "harvestable forest wood",
+                        );
+                        legend_row(ui, egui::Color32::from_rgb(184, 154, 102), "community road");
                     });
                 });
         }
@@ -624,6 +646,13 @@ impl eframe::App for LifeApp {
                             ui.label(
                                 egui::RichText::new(format!("idea: {}", e.goal.label())).strong(),
                             );
+                            if e.clan >= 0 {
+                                ui.label(format!("community role: {}", e.work_role.label()));
+                                ui.label(format!(
+                                    "role commitment: {} ticks",
+                                    (e.work_until - self.world.tick).max(0)
+                                ));
+                            }
                             let hunger = e.hunger(self.world.params.starve_ticks);
                             ui.add(
                                 egui::ProgressBar::new(e.health / e.max_health)
@@ -634,6 +663,7 @@ impl eframe::App for LifeApp {
                                     .text(format!("hunger {:.0}%", hunger * 100.0)),
                             );
                             ui.label(format!("carried food: {}", e.food));
+                            ui.label(format!("carried wood: {}", e.wood));
                             ui.label(format!("speed: {:.2} cells/tick", e.speed));
                             ui.label(format!("position: {}, {}", e.x, e.y));
 
@@ -650,11 +680,36 @@ impl eframe::App for LifeApp {
                                 );
                                 ui.label(format!("members: {}", self.world.clan_population(c.id)));
                                 ui.label(format!("stockpile food: {}", c.food));
+                                ui.label(format!("emergency reserve: {} food", c.reserve_food));
+                                ui.label(format!("stockpile wood: {}", c.wood));
                                 ui.label(format!("territory: {} tiles", c.territory));
                                 ui.label(format!("aggression: {:.2}", c.aggression));
                                 ui.label(format!(
                                     "kills {} · losses {} · recruited {}",
                                     c.stats.kills, c.stats.losses, c.stats.recruits
+                                ));
+                                ui.add_space(2.0);
+                                ui.label(
+                                    egui::RichText::new("community workforce:").small().weak(),
+                                );
+                                ui.horizontal_wrapped(|ui| {
+                                    for (i, &count) in c.workforce.iter().enumerate() {
+                                        if count > 0 {
+                                            ui.label(format!(
+                                                "{} {}",
+                                                crate::clan::ClanMode::from_index(i).label(),
+                                                count
+                                            ));
+                                        }
+                                    }
+                                });
+                                ui.label(format!(
+                                    "public works: {} wood delivered / {} roads built",
+                                    c.stats.wood_delivered, c.stats.roads_built
+                                ));
+                                ui.label(format!(
+                                    "reserve: {} deposited / {} released",
+                                    c.stats.reserve_deposited, c.stats.reserve_released
                                 ));
                                 ui.add_space(2.0);
                                 ui.label(
@@ -712,11 +767,14 @@ impl eframe::App for LifeApp {
                                     );
                                     ui.painter().rect_filled(r, 2.0, col);
                                     ui.label(format!(
-                                        "#{} {} · {}p · {}f · K{} L{}",
+                                        "#{} {} · {}p · {}f+{}r · {}w · {} roads · K{} L{}",
                                         c.id,
                                         c.mode.label(),
                                         self.world.clan_population(c.id),
                                         c.food,
+                                        c.reserve_food,
+                                        c.wood,
+                                        c.stats.roads_built,
                                         c.stats.kills,
                                         c.stats.losses
                                     ));
@@ -894,6 +952,15 @@ impl eframe::App for LifeApp {
                             ui.end_row();
                             ui.label("food security");
                             ui.label(format!("{:.0}%", t.mean_security * 100.0));
+                            ui.end_row();
+                            ui.label("community logistics");
+                            ui.label(format!("{:.0}%", t.mean_logistics * 100.0));
+                            ui.end_row();
+                            ui.label("reserve security");
+                            ui.label(format!("{:.0}%", t.mean_reserve_security * 100.0));
+                            ui.end_row();
+                            ui.label("task coverage");
+                            ui.label(format!("{:.0}%", t.mean_task_coverage * 100.0));
                             ui.end_row();
                             ui.label("clan fairness floor");
                             ui.label(format!("{:+.0}%", t.fairness_margin * 100.0));

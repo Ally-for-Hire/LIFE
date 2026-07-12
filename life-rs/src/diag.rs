@@ -38,6 +38,9 @@ struct ClanSnap {
     pop: usize,
     territory: u32,
     food: i32,
+    wood: i32,
+    reserve_food: i32,
+    roads_built: u32,
     mode: ClanMode,
     kills: u32,
     losses: u32,
@@ -45,6 +48,9 @@ struct ClanSnap {
     home_dist: f32, // mean member distance from stockpile
     max_dist: f32,
     on_terr: f32, // fraction of members standing on owned land
+    logistics: f32,
+    reserve_security: f32,
+    task_coverage: f32,
 }
 
 fn snapshot_clans(w: &World) -> Vec<ClanSnap> {
@@ -70,11 +76,15 @@ fn snapshot_clans(w: &World) -> Vec<ClanSnap> {
         if n == 0 {
             continue;
         }
+        let quality = crate::quality::score_clan(w, c.id);
         out.push(ClanSnap {
             id: c.id,
             pop: n,
             territory: c.territory,
             food: c.food,
+            wood: c.wood,
+            reserve_food: c.reserve_food,
+            roads_built: c.stats.roads_built,
             mode: c.mode,
             kills: c.stats.kills,
             losses: c.stats.losses,
@@ -82,6 +92,9 @@ fn snapshot_clans(w: &World) -> Vec<ClanSnap> {
             home_dist: dsum / n as f32,
             max_dist: dmax,
             on_terr: on as f32 / n as f32,
+            logistics: quality.logistics,
+            reserve_security: quality.reserve_security,
+            task_coverage: quality.task_coverage,
         });
     }
     out
@@ -106,8 +119,8 @@ fn mode_histogram(w: &World) -> std::collections::BTreeMap<&'static str, usize> 
 fn report(label: &str, mut w: World, ticks: i32, every: i32) {
     println!("\n================ {label} ================");
     println!(
-        "{:>6} | {:>4} {:>4} {:>4} | {:>6} {:>6} {:>6} | {:>8} {:>7} {:>7} | modes",
-        "tick", "pop", "cln", "ldr", "food", "strv", "kill", "homeDist", "onTerr%", "terr"
+        "{:>6} | {:>4} {:>4} {:>4} | {:>6} {:>6} {:>6} | {:>8} {:>7} {:>7} | {:>4} {:>4} {:>4} | modes",
+        "tick", "pop", "cln", "ldr", "food", "strv", "kill", "homeDist", "onTerr%", "terr", "log%", "res%", "task%"
     );
     let mut t = 0;
     while t < ticks {
@@ -123,18 +136,25 @@ fn report(label: &str, mut w: World, ticks: i32, every: i32) {
         let total_terr: u32 = clans.iter().map(|c| c.territory).sum();
         let total_clan_food: i32 = clans.iter().map(|c| c.food).sum();
         // pop-weighted means
-        let (mut dsum, mut osum, mut wn) = (0f32, 0f32, 0f32);
+        let (mut dsum, mut osum, mut lsum, mut rsum, mut tsum, mut wn) =
+            (0f32, 0f32, 0f32, 0f32, 0f32, 0f32);
         for c in &clans {
             dsum += c.home_dist * c.pop as f32;
             osum += c.on_terr * c.pop as f32;
+            lsum += c.logistics * c.pop as f32;
+            rsum += c.reserve_security * c.pop as f32;
+            tsum += c.task_coverage * c.pop as f32;
             wn += c.pop as f32;
         }
         let home_dist = if wn > 0.0 { dsum / wn } else { 0.0 };
         let on_terr = if wn > 0.0 { osum / wn } else { 0.0 };
+        let logistics = if wn > 0.0 { lsum / wn } else { 0.0 };
+        let reserve = if wn > 0.0 { rsum / wn } else { 0.0 };
+        let tasks = if wn > 0.0 { tsum / wn } else { 0.0 };
         let modes = mode_histogram(&w);
         let modestr: Vec<String> = modes.iter().map(|(k, v)| format!("{k}:{v}")).collect();
         println!(
-            "{:>6} | {:>4} {:>4} {:>4} | {:>6} {:>6} {:>6} | {:>8.1} {:>6.0}% {:>7} | {}",
+            "{:>6} | {:>4} {:>4} {:>4} | {:>6} {:>6} {:>6} | {:>8.1} {:>6.0}% {:>7} | {:>3.0}% {:>3.0}% {:>3.0}% | {}",
             t,
             total_pop,
             w.clan_count(),
@@ -145,6 +165,9 @@ fn report(label: &str, mut w: World, ticks: i32, every: i32) {
             home_dist,
             on_terr * 100.0,
             total_terr,
+            logistics * 100.0,
+            reserve * 100.0,
+            tasks * 100.0,
             modestr.join(" ")
         );
     }
@@ -155,9 +178,11 @@ fn report(label: &str, mut w: World, ticks: i32, every: i32) {
     clans.sort_by_key(|c| std::cmp::Reverse(c.pop));
     for c in &clans {
         println!(
-            "  clan#{:<3} pop{:<4} terr{:<5} food{:<5} {:<8} K{:<3} L{:<3} R{:<3} home{:>5.1} max{:>5.1} onTerr{:>4.0}%",
-            c.id, c.pop, c.territory, c.food, c.mode.label(),
-            c.kills, c.losses, c.recruits, c.home_dist, c.max_dist, c.on_terr * 100.0
+            "  clan#{:<3} pop{:<4} terr{:<5} food{:<5} wood{:<4} reserve{:<4} roads{:<3} {:<8} K{:<3} L{:<3} R{:<3} home{:>5.1} max{:>5.1} onTerr{:>4.0}% logistics{:>3.0}% reserve{:>3.0}% tasks{:>3.0}%",
+            c.id, c.pop, c.territory, c.food, c.wood, c.reserve_food, c.roads_built,
+            c.mode.label(), c.kills, c.losses, c.recruits,
+            c.home_dist, c.max_dist, c.on_terr * 100.0, c.logistics * 100.0,
+            c.reserve_security * 100.0, c.task_coverage * 100.0
         );
     }
     println!("\n-- final goals ({label}) --");

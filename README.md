@@ -51,6 +51,10 @@ cargo run --release        # first release build takes a few minutes, then it's 
   score. Viable brains are preserved in survivor, builder, cooperator, defender,
   and raider niches, while fixed-world benchmarks guard clan-vs-neutral fairness,
   food security, and mixture-of-experts routing health.
+- **Community Logistics V1:** the leader's six action utilities allocate a sticky,
+  simultaneous workforce instead of issuing one village-wide order. Gatherers
+  deliver forest wood, expanders turn travelled owned cells into wood-built roads,
+  and clans protect hauled food in an emergency reserve that releases during need.
 - **Combat**, **food-gated reproduction**, **food memory**, and **one NPC per
   tile**.
 - Game-like **toggleable panels**, an **NPC inspector** (its current "idea"),

@@ -1,6 +1,8 @@
 //! Entity: one NPC on the grid. Kept as a plain struct in a `Vec` with
 //! swap-remove on death (no per-tick array reallocation like the JS `filter`).
 
+use crate::clan::ClanMode;
+
 /// What the NPC is currently trying to do — surfaced in the inspector so you
 /// can read each NPC's "idea" at a glance.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -11,6 +13,9 @@ pub enum Goal {
     Starving,
     Gathering,
     Hauling,
+    GatheringWood,
+    HaulingWood,
+    BuildingRoad,
     Fighting,
     Recruiting,
     Defending,
@@ -26,6 +31,9 @@ impl Goal {
             Goal::Starving => "starving",
             Goal::Gathering => "gathering food",
             Goal::Hauling => "hauling to stockpile",
+            Goal::GatheringWood => "gathering wood",
+            Goal::HaulingWood => "hauling wood",
+            Goal::BuildingRoad => "building a road",
             Goal::Fighting => "fighting",
             Goal::Recruiting => "recruiting",
             Goal::Defending => "defending",
@@ -46,12 +54,18 @@ pub struct Entity {
     pub is_leader: bool,
     /// Carried food units.
     pub food: i32,
+    /// Carried forest wood units.
+    pub wood: i32,
     pub ticks_since_food: i32,
     /// Personal hunger trigger in [0.3, 0.7], re-rolled after each meal.
     pub hunger_threshold: f32,
     pub goal: Goal,
     /// Owning clan id, or -1 when unaffiliated.
     pub clan: i32,
+    /// Sticky community job. Hunger and immediate defense may override it.
+    pub work_role: ClanMode,
+    /// Earliest tick at which normal quota balancing may freely reassign it.
+    pub work_until: i32,
     /// Last cell where this NPC saw or ate food — its food "memory". Lets it
     /// navigate back to a feeding ground instead of wandering off and starving.
     pub last_food: Option<(i32, i32)>,

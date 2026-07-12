@@ -70,6 +70,27 @@ season cycle turns plenty into scarcity.
 | `birth_interval` | 180 | ticks between reproduction checks |
 | `birth_food_cost` | 4 | food a clan spends per birth |
 
+## Community Logistics V1 (fixed rules)
+
+The first logistics slice deliberately adds no live `Params` knobs, so there is
+no separate parameter panel yet. These deterministic constants define the V1
+contract:
+
+| Rule | Value | Meaning |
+| --- | --- | --- |
+| workforce commitment | 240 ticks | normal quota balancing keeps assignments sticky for two leader decisions |
+| forest wood capacity | 6 | maximum harvestable wood stored on one forest tile |
+| wood regrowth | 8% every 360 ticks | deterministic world-RNG chance for a depleted forest tile to regain one wood |
+| road cost | 2 wood | shared stockpile material spent per road cell |
+| road work interval | 60 ticks | cadence for turning qualifying traffic cells into roads |
+| road traffic floor | 3 | minimum recent movement pressure before a cell qualifies |
+| ordinary food target | 4 per member | hauled food fills this working stockpile first |
+| emergency reserve cap | 4 per member | surplus food protected for direct feeding after ordinary food runs out |
+
+Brain inputs 16, 20, and 21 now expose road coverage, stored wood per member,
+and reachable forest wood. The network dimensions remain fixed, so existing
+champion files remain compatible.
+
 ## Terrain (applies on Populate)
 
 | Parameter | Default | Meaning |

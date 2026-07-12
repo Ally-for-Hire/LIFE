@@ -16,8 +16,9 @@ shape the layout like a game HUD.
 
 - **Drag** to pan, **scroll** to zoom.
 - **Click an NPC** to select it (yellow highlight) and read it in the Inspector.
-- Terrain is the base layer; clan territory tints over it; bright cells are food;
-  yellow cells are stockpiles; leaders are lightened.
+- Terrain is the base layer; clan territory tints over it; brown forest cells
+  carry harvestable wood, tan cells are roads, bright green cells are food,
+  yellow cells are stockpiles, and leaders are lightened.
 
 ## Controls panel (left)
 
@@ -34,12 +35,13 @@ shape the layout like a game HUD.
 
 ## Inspector panel (right)
 
-- The selected NPC's **idea** (current goal), health and hunger bars, carried
-  food, speed, and position.
-- If it belongs to a clan: the clan's **order (mode)**, members, stockpile food,
-  territory, aggression, K/L/recruited, the **master → sub-mind routing** (which
+- The selected NPC's **idea** (current goal), sticky **community role**, health
+  and hunger bars, carried food/wood, speed, and position.
+- If it belongs to a clan: the clan's **order (mode)**, live workforce mix,
+  members, ordinary/reserve food, shared wood, public-work counters, territory,
+  aggression, K/L/recruited, the **master → sub-mind routing** (which
   expert the leader is delegating to), and the **blended action utilities**.
-- A live **clan list** (color, mode, people, food, K/L).
+- A live **clan list** (color, mode, people, food/reserve, wood, roads, K/L).
 
 ## Graphs panel (bottom)
 
@@ -49,7 +51,9 @@ Rolling plots of **population & leaders & clans**, **food on the map**, and
 ## Training window (floating)
 
 - **Start / Stop** evolution (runs on a background thread across all CPU cores).
-- **Stats:** generation, best/avg/best-ever fitness, last-gen time.
+- **Stats:** generation, best/avg/best-ever fitness, robust survival, food and
+  reserve security, community logistics, task coverage, routing/archive health,
+  and last-generation time.
 - **Config:** population, episode ticks, clans per arena, repeats, arena size,
   arena trees/neutrals, mutation rate & strength, elite count.
 - **Seed best brain → live world:** inject the current champion as a new clan so

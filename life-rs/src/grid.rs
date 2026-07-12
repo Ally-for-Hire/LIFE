@@ -29,6 +29,10 @@ pub struct Grid {
     pub owner: Vec<i32>,
     /// Road level per tile, 0 = none. Higher = cheaper movement (later).
     pub road: Vec<u8>,
+    /// Harvestable wood on forest tiles. Regrows deterministically.
+    pub wood: Vec<u8>,
+    /// Recent movement pressure used to place roads where people actually travel.
+    pub traffic: Vec<u16>,
     /// Pellet energy per tile, 0 = none. Replaces the JS pellet `Map`.
     pub pellet: Vec<u8>,
     /// Soil depletion per tile, 0 = fresh .. 255 = exhausted. Harvesting raises
@@ -47,6 +51,8 @@ impl Grid {
             fertility: vec![128; n],
             owner: vec![NO_OWNER; n],
             road: vec![0; n],
+            wood: vec![0; n],
+            traffic: vec![0; n],
             pellet: vec![0; n],
             depletion: vec![0; n],
         }

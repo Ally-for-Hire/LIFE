@@ -9,7 +9,7 @@ The single source of truth and the per-tick simulation.
 
 | Member | Description |
 | --- | --- |
-| `grid: Grid` | terrain / fertility / owner / road / pellet layers |
+| `grid: Grid` | terrain / fertility / owner / wood / traffic / road / pellet layers |
 | `entities: Vec<Entity>` | every NPC |
 | `trees: Vec<Tree>` | persistent food sources |
 | `clans: Vec<Clan>` | active clans |
@@ -40,26 +40,30 @@ Every tunable variable, read live each tick: food/tree rates, **farms**
 ## `Entity` + `Goal` (`entity.rs`)
 
 One NPC: `id`, position, `speed`/`move_budget`, `health`, `is_leader`, carried
-`food`, hunger state, `last_food` memory, `attack_cooldown`, and `clan` (id or
--1). `Goal` is the human-readable current intent shown in the inspector
-(wandering, seeking food, gathering, hauling, fighting, recruiting, defending,
-claiming, eating, starving).
+`food` and `wood`, hunger state, `last_food` memory, `attack_cooldown`, and `clan`
+(id or -1). `work_role` is its sticky workforce assignment; `Goal` remains the
+human-readable immediate intent shown in the inspector (including gathering or
+hauling food/wood and building roads). Hunger and immediate defense may override
+the assigned role without erasing it.
 
 ## `Clan` + `ClanMode` (`clan.rs`)
 
 A leader + followers with a `Brain`. Holds the `stockpile`, stored `food`,
+protected `reserve_food`, shared `wood`, deterministic `workforce` counts,
 `territory` count, **`fertile_capacity`** (summed fertility of owned tiles → the
 RDH population cap), `aggression`, current `mode`, cached targets (`enemy_pos`,
 `recruit_target`, `neutral_pos`, `trespasser_pos`, `expand_target`),
 `last_claim_tick`, and `stats` (kills / losses / recruits / peak / founded /
-`on_terr_tick_sum`, the settled-on-own-land time used by the fitness). `ClanMode`
-is one of Gather / Recruit / Expand / Defend / Attack / Scout.
+`on_terr_tick_sum`, role time, wood delivered, roads built, and reserve
+deposits/releases). `ClanMode` is one of Gather / Recruit / Expand / Defend /
+Attack / Scout; `mode` is now the headline order while members can simultaneously
+hold different roles.
 
 ## `Brain` (`brain.rs`)
 
 A **hierarchical mixture-of-experts** leader policy. A master *gate* network
-(17 inputs → 10 hidden tanh → `N_EXPERTS` softmax) routes over several *sub-minds*,
-each a small net (17 → 12 tanh → 7 sigmoid). `evaluate(inputs)` returns the
+(32 inputs → 10 hidden tanh → `N_EXPERTS` softmax) routes over several *sub-minds*,
+each a small net (32 → 12 tanh → 7 sigmoid). `evaluate(inputs)` returns the
 gate-weighted blend of the sub-minds' action vectors **and** the routing weights:
 outputs 0..5 are clan-mode utilities, output 6 is the aggression dial. Nothing is
 hardcoded — evolution specialises the sub-minds and learns the routing.
