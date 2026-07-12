@@ -64,6 +64,7 @@ pub struct AiBenchmarkReport {
     pub mean_road_utility: f32,
     pub mean_reserve_security: f32,
     pub mean_task_coverage: f32,
+    pub mean_care: f32,
     pub routing_entropy: f32,
     pub expert_coverage: f32,
     pub eligible: bool,
@@ -102,6 +103,38 @@ pub struct LogisticsBenchmarkReport {
     pub road_utility_delta: f32,
     pub reserve_use_delta: f32,
     pub reserve_security_delta: f32,
+    pub survival_non_regression: bool,
+}
+
+/// One arm of the deterministic Community Care on/off benchmark.
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct CareBenchmarkArm {
+    pub robust_survival: f32,
+    pub mean_security: f32,
+    pub clan_cohort_survival: f32,
+    pub neutral_cohort_survival: f32,
+    pub fairness_delta: f32,
+    pub robust_fairness_delta: f32,
+    pub rescue_rate: f32,
+    pub incapacitations: f32,
+    pub rescues: f32,
+    pub bleedouts: f32,
+    pub combat_deaths: f32,
+    pub eligible: bool,
+}
+
+/// Same-world care treatment/control report. The disabled arm keeps every
+/// economy and policy input identical but converts lethal combat directly to death.
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct CareBenchmarkReport {
+    pub worlds: usize,
+    pub enabled: CareBenchmarkArm,
+    pub disabled: CareBenchmarkArm,
+    pub clan_survival_delta: f32,
+    pub security_delta: f32,
+    pub combat_death_delta: f32,
     pub survival_non_regression: bool,
 }
 
@@ -172,6 +205,7 @@ pub struct Trainer {
     pub mean_road_utility: f32,
     pub mean_reserve_security: f32,
     pub mean_task_coverage: f32,
+    pub mean_care: f32,
     pub routing_balance: f32,
     pub history: Vec<[f64; 2]>,     // (generation, best fitness)
     pub avg_history: Vec<[f64; 2]>, // (generation, average fitness)
@@ -216,6 +250,7 @@ impl Trainer {
             mean_road_utility: 0.0,
             mean_reserve_security: 0.0,
             mean_task_coverage: 0.0,
+            mean_care: 0.0,
             routing_balance: 0.0,
             history: Vec::new(),
             avg_history: Vec::new(),
@@ -478,7 +513,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
             append(
                 log_path,
                 &format!(
-                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} haul {:.2} roads {:.2} reserve {:.2} tasks {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
+                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} haul {:.2} roads {:.2} reserve {:.2} tasks {:.2} care {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
                     champ_score,
                     cq.robust_survival,
                     cq.security,
@@ -487,6 +522,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                     cq.road_utility,
                     cq.reserve_security,
                     cq.task_coverage,
+                    cq.care,
                     cq.routing_entropy,
                     cq.expert_coverage,
                     BENCH_WORLDS,
@@ -627,6 +663,7 @@ impl Trainer {
         self.mean_road_utility = best_quality.road_utility;
         self.mean_reserve_security = best_quality.reserve_security;
         self.mean_task_coverage = best_quality.task_coverage;
+        self.mean_care = best_quality.care;
         self.routing_balance = best_quality.routing_entropy * best_quality.expert_coverage;
         let improvement_margin = self.best_ever.abs().max(1.0) * 0.002;
         if self.best_fitness > self.best_ever + improvement_margin {
@@ -1009,6 +1046,7 @@ impl QualityTotals {
         self.sum.road_utility += score.road_utility;
         self.sum.reserve_security += score.reserve_security;
         self.sum.task_coverage += score.task_coverage;
+        self.sum.care += score.care;
         self.sum.defense += score.defense;
         self.sum.combat += score.combat;
         self.robust_survival = self.robust_survival.min(score.survival);
@@ -1040,6 +1078,7 @@ impl QualityTotals {
             road_utility: self.sum.road_utility * inv,
             reserve_security: self.sum.reserve_security * inv,
             task_coverage: self.sum.task_coverage * inv,
+            care: self.sum.care * inv,
             defense: self.sum.defense * inv,
             combat: self.sum.combat * inv,
             routing_entropy,
@@ -1143,7 +1182,12 @@ fn run_arena_general(
     for _ in 0..episode {
         w.step();
     }
-    let alive: HashSet<u32> = w.entities.iter().map(|entity| entity.id).collect();
+    let alive: HashSet<u32> = w
+        .entities
+        .iter()
+        .filter(|entity| entity.is_active())
+        .map(|entity| entity.id)
+        .collect();
     let cohort_ratio = |cohort: &HashSet<u32>| {
         if cohort.is_empty() {
             1.0
@@ -1337,7 +1381,12 @@ pub fn benchmark_ai_quality(
             for _ in 0..episode {
                 world.step();
             }
-            let alive: HashSet<u32> = world.entities.iter().map(|entity| entity.id).collect();
+            let alive: HashSet<u32> = world
+                .entities
+                .iter()
+                .filter(|entity| entity.is_active())
+                .map(|entity| entity.id)
+                .collect();
             let cohort_ratio = |cohort: &HashSet<u32>| {
                 if cohort.is_empty() {
                     1.0
@@ -1381,6 +1430,7 @@ pub fn benchmark_ai_quality(
         mean_road_utility: quality.road_utility,
         mean_reserve_security: quality.reserve_security,
         mean_task_coverage: quality.task_coverage,
+        mean_care: quality.care,
         routing_entropy: quality.routing_entropy,
         expert_coverage: quality.expert_coverage,
         eligible: quality.eligible && fairness_delta >= -0.05,
@@ -1523,7 +1573,12 @@ fn run_logistics_benchmark_arm(
     for _ in 0..episode {
         world.step();
     }
-    let alive: HashSet<u32> = world.entities.iter().map(|entity| entity.id).collect();
+    let alive: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.is_active())
+        .map(|entity| entity.id)
+        .collect();
     let cohort_ratio = |cohort: &HashSet<u32>| {
         if cohort.is_empty() {
             1.0
@@ -1550,6 +1605,186 @@ fn run_logistics_benchmark_arm(
         clan_cohort_survival,
         neutral_cohort_survival,
         reserve_use,
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct CareBenchmarkObservation {
+    quality: QualityScore,
+    clan_cohort_survival: f32,
+    neutral_cohort_survival: f32,
+    incapacitations: f32,
+    rescues: f32,
+    bleedouts: f32,
+    combat_deaths: f32,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct CareArmTotals {
+    quality: QualityTotals,
+    clan_cohort_survival: f32,
+    neutral_cohort_survival: f32,
+    incapacitations: f32,
+    rescues: f32,
+    bleedouts: f32,
+    combat_deaths: f32,
+    count: u32,
+}
+
+#[cfg(test)]
+impl CareArmTotals {
+    fn add(&mut self, observation: CareBenchmarkObservation) {
+        self.quality.add(observation.quality);
+        self.clan_cohort_survival += observation.clan_cohort_survival;
+        self.neutral_cohort_survival += observation.neutral_cohort_survival;
+        self.incapacitations += observation.incapacitations;
+        self.rescues += observation.rescues;
+        self.bleedouts += observation.bleedouts;
+        self.combat_deaths += observation.combat_deaths;
+        self.count += 1;
+    }
+
+    fn finish(self, brain: &Brain) -> CareBenchmarkArm {
+        if self.count == 0 {
+            return CareBenchmarkArm::default();
+        }
+        let inv = 1.0 / self.count as f32;
+        let quality = self.quality.finish(brain);
+        let clan_cohort_survival = self.clan_cohort_survival * inv;
+        let neutral_cohort_survival = self.neutral_cohort_survival * inv;
+        CareBenchmarkArm {
+            robust_survival: quality.robust_survival,
+            mean_security: quality.security,
+            clan_cohort_survival,
+            neutral_cohort_survival,
+            fairness_delta: clan_cohort_survival - neutral_cohort_survival,
+            robust_fairness_delta: quality.robust_fairness,
+            rescue_rate: quality.care,
+            incapacitations: self.incapacitations * inv,
+            rescues: self.rescues * inv,
+            bleedouts: self.bleedouts * inv,
+            combat_deaths: self.combat_deaths * inv,
+            eligible: quality.eligible
+                && clan_cohort_survival - neutral_cohort_survival >= FAIRNESS_FLOOR,
+        }
+    }
+}
+
+/// Compare Community Care V1 against immediate combat death on identical
+/// generated worlds and seeds. Ordinary training never pays for both arms.
+#[cfg(test)]
+pub fn benchmark_care_quality(
+    brain: &Brain,
+    base: &Params,
+    stage: u32,
+    episode: i32,
+    n_worlds: usize,
+    seed: u64,
+) -> CareBenchmarkReport {
+    if n_worlds == 0 {
+        return CareBenchmarkReport::default();
+    }
+    let paired: Vec<(CareBenchmarkObservation, CareBenchmarkObservation)> = (0..n_worlds)
+        .into_par_iter()
+        .map(|wi| {
+            let mut wr = Rng::new(seed ^ (wi as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let eff_stage = (wi as u32) % (stage + 1);
+            let spec = random_world_spec(base, &mut wr, eff_stage);
+            let arena_seed = seed.wrapping_add((wi as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+            (
+                run_care_benchmark_arm(brain, &spec, episode, arena_seed, true),
+                run_care_benchmark_arm(brain, &spec, episode, arena_seed, false),
+            )
+        })
+        .collect();
+
+    let mut enabled_totals = CareArmTotals::default();
+    let mut disabled_totals = CareArmTotals::default();
+    for (enabled, disabled) in paired {
+        enabled_totals.add(enabled);
+        disabled_totals.add(disabled);
+    }
+    let enabled = enabled_totals.finish(brain);
+    let disabled = disabled_totals.finish(brain);
+    let clan_survival_delta = enabled.clan_cohort_survival - disabled.clan_cohort_survival;
+    CareBenchmarkReport {
+        worlds: n_worlds,
+        clan_survival_delta,
+        security_delta: enabled.mean_security - disabled.mean_security,
+        combat_death_delta: enabled.combat_deaths - disabled.combat_deaths,
+        survival_non_regression: enabled.robust_survival + 1e-6 >= disabled.robust_survival
+            && clan_survival_delta >= -1e-6,
+        enabled,
+        disabled,
+    }
+}
+
+#[cfg(test)]
+fn run_care_benchmark_arm(
+    brain: &Brain,
+    spec: &WorldSpec,
+    episode: i32,
+    seed: u64,
+    community_care: bool,
+) -> CareBenchmarkObservation {
+    let mut world = World::new(spec.world_size, seed);
+    world.params = spec.params.clone();
+    world.params.community_care = community_care;
+    let brains = [brain.clone(), brain.clone()];
+    let ids = world.setup_arena(&brains, spec.trees, spec.neutrals);
+    let clan_id = ids[0];
+    let clan_cohort: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.clan == clan_id)
+        .map(|entity| entity.id)
+        .collect();
+    let neutral_cohort: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.clan < 0)
+        .map(|entity| entity.id)
+        .collect();
+    for _ in 0..episode {
+        world.step();
+    }
+    let alive: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.is_active())
+        .map(|entity| entity.id)
+        .collect();
+    let cohort_ratio = |cohort: &HashSet<u32>| {
+        if cohort.is_empty() {
+            1.0
+        } else {
+            cohort.iter().filter(|id| alive.contains(id)).count() as f32 / cohort.len() as f32
+        }
+    };
+    let clan_cohort_survival = cohort_ratio(&clan_cohort);
+    let neutral_cohort_survival = cohort_ratio(&neutral_cohort);
+    let mut quality = score_clan_quality(&world, clan_id);
+    quality.fairness = clan_cohort_survival - neutral_cohort_survival;
+    quality.robust_fairness = quality.fairness;
+    quality.eligible &= quality.fairness >= FAIRNESS_FLOOR;
+    let (incapacitations, rescues, bleedouts) =
+        world.clan_by_id(clan_id).map_or((0.0, 0.0, 0.0), |clan| {
+            (
+                clan.stats.incapacitations as f32,
+                clan.stats.rescues as f32,
+                clan.stats.bleedouts as f32,
+            )
+        });
+    CareBenchmarkObservation {
+        quality,
+        clan_cohort_survival,
+        neutral_cohort_survival,
+        incapacitations,
+        rescues,
+        bleedouts,
+        combat_deaths: world.deaths_combat as f32,
     }
 }
 
@@ -1610,6 +1845,9 @@ fn champion_promotion_rejections(
         }
         if challenger.expert_coverage + PROMOTION_COVERAGE_TOLERANCE < current.expert_coverage {
             reasons.push("expert coverage regressed from champion");
+        }
+        if challenger.care + PROMOTION_COVERAGE_TOLERANCE < current.care {
+            reasons.push("community care regressed from champion");
         }
     }
 
@@ -1778,6 +2016,7 @@ mod tests {
         assert!((a.mean_road_utility - b.mean_road_utility).abs() < 1e-6);
         assert!((a.mean_reserve_security - b.mean_reserve_security).abs() < 1e-6);
         assert!((a.mean_task_coverage - b.mean_task_coverage).abs() < 1e-6);
+        assert!((a.mean_care - b.mean_care).abs() < 1e-6);
         assert!((0.0..=1.0).contains(&a.routing_entropy));
         assert!((0.0..=1.0).contains(&a.expert_coverage));
         assert!(
@@ -1867,6 +2106,64 @@ mod tests {
             report.security_delta >= -0.01,
             "logistics-enabled food security fell materially below the paired control: {report:#?}"
         );
+    }
+
+    #[test]
+    fn care_ablation_is_deterministic() {
+        let brain = Brain::load(CHAMPION_PATH).expect("tracked champion.bin should load");
+        let base = Params::default();
+        let a = benchmark_care_quality(&brain, &base, 3, 1500, 4, 0xCA2E_5EED);
+        let b = benchmark_care_quality(&brain, &base, 3, 1500, 4, 0xCA2E_5EED);
+        assert_eq!(a.worlds, b.worlds);
+        assert!((a.clan_survival_delta - b.clan_survival_delta).abs() < 1e-6);
+        assert!((a.security_delta - b.security_delta).abs() < 1e-6);
+        assert!((a.combat_death_delta - b.combat_death_delta).abs() < 1e-6);
+        assert!((a.enabled.rescues - b.enabled.rescues).abs() < 1e-6);
+        assert!((a.enabled.rescue_rate - b.enabled.rescue_rate).abs() < 1e-6);
+        assert!((a.enabled.bleedouts - b.enabled.bleedouts).abs() < 1e-6);
+        assert!(
+            (a.enabled.neutral_cohort_survival - b.enabled.neutral_cohort_survival).abs() < 1e-6
+        );
+        assert!((a.enabled.robust_fairness_delta - b.enabled.robust_fairness_delta).abs() < 1e-6);
+        assert_eq!(a.disabled.rescues, 0.0);
+    }
+
+    #[test]
+    fn tracked_champion_care_preserves_survival_gates() {
+        let brain = Brain::load(CHAMPION_PATH).expect("tracked champion.bin should load");
+        let report =
+            benchmark_care_quality(&brain, &Params::default(), MAX_STAGE, 4000, 13, 0xCA2E_BEEF);
+        println!("Community Care V1 paired benchmark: {report:#?}");
+        assert!(
+            report.enabled.eligible,
+            "care enabled became ineligible: {report:#?}"
+        );
+        assert!(
+            report.enabled.robust_survival >= PROMOTION_SURVIVAL_FLOOR,
+            "care robust survival regressed: {report:#?}"
+        );
+        assert!(
+            report.enabled.mean_security >= PROMOTION_SECURITY_FLOOR,
+            "care food security regressed: {report:#?}"
+        );
+        assert!(
+            report.enabled.fairness_delta >= FAIRNESS_FLOOR,
+            "care clan fairness regressed: {report:#?}"
+        );
+        assert!(
+            report.survival_non_regression,
+            "care reduced paired cohort survival: {report:#?}"
+        );
+        assert!(
+            report.security_delta >= -PROMOTION_SECURITY_TOLERANCE,
+            "care reduced paired food security: {report:#?}"
+        );
+        if report.enabled.incapacitations > 0.0 {
+            assert!(
+                report.enabled.rescues > 0.0,
+                "care had opportunities but completed no rescues: {report:#?}"
+            );
+        }
     }
 
     fn promotion_quality(fitness: f32) -> QualityScore {

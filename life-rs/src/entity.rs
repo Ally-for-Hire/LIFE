@@ -16,6 +16,8 @@ pub enum Goal {
     GatheringWood,
     HaulingWood,
     BuildingRoad,
+    Incapacitated,
+    Rescuing,
     Fighting,
     Recruiting,
     Defending,
@@ -34,6 +36,8 @@ impl Goal {
             Goal::GatheringWood => "gathering wood",
             Goal::HaulingWood => "hauling wood",
             Goal::BuildingRoad => "building a road",
+            Goal::Incapacitated => "incapacitated",
+            Goal::Rescuing => "rescuing a clanmate",
             Goal::Fighting => "fighting",
             Goal::Recruiting => "recruiting",
             Goal::Defending => "defending",
@@ -71,10 +75,25 @@ pub struct Entity {
     pub last_food: Option<(i32, i32)>,
     /// Ticks until this NPC can attack again.
     pub attack_cooldown: i32,
+    /// Positive while a combat casualty can still be rescued by its clan.
+    pub incapacitated_until: i32,
+    /// Clan responsible for the incapacitating blow, used for bleed-out credit.
+    pub downed_by_clan: i32,
+    /// Attacker responsible for the wound, retained for delayed loot transfer.
+    pub downed_by_entity: Option<u32>,
+    /// Active rescue assignment for a Gather/Defend worker.
+    pub rescue_target: Option<u32>,
+    /// Rescuer physically carrying this incapacitated member toward home.
+    pub carried_by: Option<u32>,
     pub dead: bool,
 }
 
 impl Entity {
+    #[inline]
+    pub fn is_active(&self) -> bool {
+        !self.dead && self.incapacitated_until == 0
+    }
+
     #[inline]
     pub fn hunger(&self, starve_ticks: i32) -> f32 {
         self.ticks_since_food as f32 / starve_ticks as f32

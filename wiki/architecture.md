@@ -53,9 +53,10 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
    32-input brain shape. Every 15 ticks it refreshes cached targets (nearest
    enemy, neutral, trespasser, fertility-scored frontier). Targets are cached on
    the clan so per-entity updates never scan the world.
-4. **rebuild occupancy**, then **update each entity** (hunger/individual foraging
-   first as a safety net, then its assigned community role, movement, wood
-   delivery, and road work).
+4. **prepare rescues**, **rebuild occupancy**, then **update each entity**
+   (hunger first; assigned care response next; then its ordinary community role,
+   movement, delivery, and road work). **advance rescues** physically carries
+   patients toward the clan stockpile.
 5. **recruitment** (deliberate only), **combat** (trespasser / on-campaign / war),
    **raiding** (stockpile theft), **detach the dead** (losses, succession,
    disbanding), **record stats**.
@@ -90,6 +91,10 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
   layer, preventing avoidable RNG drift from the regrowth branch. Later divergence
   caused by the mechanics changing movement, survival, or population is causal.
   Existing roads remain in state but are ignored by movement-cost/pathing calculations.
+- `community_care=false` is an immediate-combat-death control. In the enabled
+  arm, only active entities participate in work, hostility, reproduction, and
+  cohort survival; deterministic rescue assignments and persistent carrying
+  links make care part of world state without changing brain dimensions.
 
 ## Logistics validation counters
 
@@ -99,6 +104,15 @@ hauling throughput, `road_steps` counts real member movement on active roads, an
 `road_cost_saved_milli` accumulates the movement cost those road steps avoided.
 Quality/training expose hauling throughput and road utility separately while
 retaining the composite logistics field for compatibility.
+
+## Community care validation counters
+
+Each clan records incapacitations, completed rescues, and bleed-outs. Quality uses
+the completed-rescues/incapacitations ratio rather than raw activity, so creating
+more casualties cannot improve selection. A paired benchmark checks survival,
+security, and clan fairness with care enabled/disabled; focused forced-combat
+tests prove wound, assignment, physical evacuation, recovery, and delayed death
+accounting when the peaceful tracked champion creates no natural opportunities.
 
 ## Rendering
 

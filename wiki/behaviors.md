@@ -121,6 +121,22 @@ the compatibility `logistics` composite. Paired deterministic benchmarks can
 therefore compare the same brain, seeds, and worlds with logistics enabled and
 disabled instead of treating road construction count as proof of benefit.
 
+## Community Care V1
+
+With `Params::community_care` enabled, lethal combat incapacitates a clan member
+for 240 ticks instead of deleting it immediately. The casualty contributes zero
+active workforce and cannot move, fight, raid, recruit, reproduce, build, or count
+as a surviving benchmark cohort member. Input 28 reports mean normalized health
+across the living roster, with incapacitated members contributing zero.
+
+Healthy Gather and Defend workers within 12 cells receive a deterministic rescue
+override. Hunger remains the rescuer's personal priority; otherwise it reaches the
+patient, carries the patient one cell behind it to the stockpile, and restores 35%
+health. A missed deadline becomes a normal combat death and retains delayed kill,
+loss, and loot credit. The disabled arm keeps immediate-death behavior for causal
+comparison. Care quality is completed rescues divided by incapacitations, so
+creating more injuries cannot improve the score by itself.
+
 If a leader dies a follower is promoted; a clan disbands only when no members
 remain (its territory is then freed). To keep the world a living patchwork,
 `maintain_clans` re-forms villages from masterless **refugees** when war thins the

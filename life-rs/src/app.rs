@@ -375,7 +375,9 @@ impl LifeApp {
         }
         // entities
         for e in &self.world.entities {
-            let c = if e.clan >= 0 {
+            let c = if e.incapacitated_until > self.world.tick {
+                egui::Color32::from_rgb(238, 126, 82)
+            } else if e.clan >= 0 {
                 let base = clan_col
                     .get(&e.clan)
                     .copied()
@@ -668,6 +670,12 @@ impl eframe::App for LifeApp {
                                     "role commitment: {} ticks",
                                     (e.work_until - self.world.tick).max(0)
                                 ));
+                                if e.incapacitated_until > self.world.tick {
+                                    ui.label(format!(
+                                        "rescue window: {} ticks",
+                                        e.incapacitated_until - self.world.tick
+                                    ));
+                                }
                             }
                             let hunger = e.hunger(self.world.params.starve_ticks);
                             ui.add(
@@ -703,6 +711,11 @@ impl eframe::App for LifeApp {
                                 } else {
                                     "logistics infrastructure: disabled (ablation)"
                                 });
+                                ui.label(if self.world.params.community_care {
+                                    "community care: enabled"
+                                } else {
+                                    "community care: disabled (ablation)"
+                                });
                                 ui.label(format!("territory: {} tiles", c.territory));
                                 ui.label(format!("aggression: {:.2}", c.aggression));
                                 ui.label(format!(
@@ -737,6 +750,12 @@ impl eframe::App for LifeApp {
                                 ui.label(format!(
                                     "reserve: {} deposited / {} released",
                                     c.stats.reserve_deposited, c.stats.reserve_released
+                                ));
+                                ui.label(format!(
+                                    "care: {} rescued / {} incapacitated / {} bled out",
+                                    c.stats.rescues,
+                                    c.stats.incapacitations,
+                                    c.stats.bleedouts
                                 ));
                                 ui.add_space(2.0);
                                 ui.label(
@@ -794,7 +813,7 @@ impl eframe::App for LifeApp {
                                     );
                                     ui.painter().rect_filled(r, 2.0, col);
                                     ui.label(format!(
-                                        "#{} {} · {}p · {}f+{}r · {}w · {} roads · K{} L{}",
+                                        "#{} {} · {}p · {}f+{}r · {}w · {} roads · {} rescues · K{} L{}",
                                         c.id,
                                         c.mode.label(),
                                         self.world.clan_population(c.id),
@@ -802,6 +821,7 @@ impl eframe::App for LifeApp {
                                         c.reserve_food,
                                         c.wood,
                                         c.stats.roads_built,
+                                        c.stats.rescues,
                                         c.stats.kills,
                                         c.stats.losses
                                     ));
@@ -994,6 +1014,9 @@ impl eframe::App for LifeApp {
                             ui.end_row();
                             ui.label("task coverage");
                             ui.label(format!("{:.0}%", t.mean_task_coverage * 100.0));
+                            ui.end_row();
+                            ui.label("community care");
+                            ui.label(format!("{:.0}%", t.mean_care * 100.0));
                             ui.end_row();
                             ui.label("clan fairness floor");
                             ui.label(format!("{:+.0}%", t.fairness_margin * 100.0));
@@ -1316,6 +1339,21 @@ fn params_ui(ui: &mut egui::Ui, p: &mut Params, tps: f32) {
                     "wood hauling, reserves, road construction, and road movement savings are active"
                 } else {
                     "causal ablation: reserve/wood/road mechanics are off and existing roads give no movement benefit; simultaneous roles remain active"
+                })
+                .small()
+                .weak(),
+            );
+        });
+
+    egui::CollapsingHeader::new("Community care")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.checkbox(&mut p.community_care, "enable Community Care V1");
+            ui.label(
+                egui::RichText::new(if p.community_care {
+                    "nearby gatherers and defenders evacuate incapacitated clanmates before bleed-out"
+                } else {
+                    "causal ablation: lethal combat causes immediate death and no rescue response"
                 })
                 .small()
                 .weak(),

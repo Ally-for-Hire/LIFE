@@ -73,6 +73,8 @@ pub struct QualityScore {
     pub reserve_security: f32,
     /// Breadth and balance of sticky community jobs, including the safety core.
     pub task_coverage: f32,
+    /// Successful recovery of incapacitated clanmates, normalized by member-time.
+    pub care: f32,
     pub defense: f32,
     pub combat: f32,
     pub routing_entropy: f32,
@@ -97,6 +99,7 @@ impl Default for QualityScore {
             road_utility: 0.0,
             reserve_security: 0.0,
             task_coverage: 0.0,
+            care: 0.0,
             defense: 0.0,
             combat: 0.0,
             routing_entropy: 0.0,
@@ -114,11 +117,12 @@ impl QualityScore {
                 + ((self.fairness + 1.0) * 0.5).clamp(0.0, 1.0) * 0.20,
             self.settlement * 0.45 + self.expansion * 0.35 + self.security * 0.20,
             self.cooperation * 0.35
-                + self.logistics * 0.25
+                + self.logistics * 0.20
                 + self.reserve_security * 0.15
                 + self.task_coverage * 0.10
-                + self.survival * 0.10
-                + self.security * 0.05,
+                + self.care * 0.15
+                + self.survival * 0.07
+                + self.security * 0.03,
             self.defense * 0.55 + self.settlement * 0.20 + self.survival * 0.25,
             self.combat * 0.60 + self.expansion * 0.15 + self.survival * 0.25,
         ]
@@ -225,6 +229,11 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
     let reserve_coverage = (protected_food / 3.0).clamp(0.0, 1.0);
     let reserve_flow = reserve_flow_rate / (reserve_flow_rate + 3.0);
     let reserve_security = (reserve_coverage * 0.70 + reserve_flow * 0.30).clamp(0.0, 1.0);
+    let care = if c.stats.incapacitations == 0 {
+        0.0
+    } else {
+        c.stats.rescues as f32 / c.stats.incapacitations as f32
+    };
 
     let role_total = c.stats.role_tick_sum.iter().sum::<u64>() as f32;
     let task_coverage = if role_total > 0.0 {
@@ -279,9 +288,12 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
         .clamp(0.0, 1.0);
     let expansion = (c.fertile_capacity.sqrt() / 14.0 + terr.sqrt() / 160.0).clamp(0.0, 1.0);
     let recruitment = (recruits / (recruits + 8.0)).clamp(0.0, 1.0);
-    let cooperation =
-        (recruitment * 0.25 + logistics * 0.30 + reserve_security * 0.25 + task_coverage * 0.20)
-            .clamp(0.0, 1.0);
+    let cooperation = (recruitment * 0.20
+        + logistics * 0.25
+        + reserve_security * 0.20
+        + task_coverage * 0.20
+        + care * 0.15)
+        .clamp(0.0, 1.0);
     let defense = (survival * (1.0 - losses / (losses + pop + 1.0))).clamp(0.0, 1.0);
     let combat = if kills <= 0.0 {
         0.0
@@ -304,6 +316,7 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
         road_utility,
         reserve_security,
         task_coverage,
+        care,
         defense,
         combat,
         routing_entropy: 0.0,

@@ -78,6 +78,7 @@ validation switch:
 | Parameter | Default | Meaning |
 | --- | --- | --- |
 | `community_logistics` | true | enables wood jobs, protected reserves, road construction, and road movement savings; false is the paired infrastructure-disabled ablation |
+| `community_care` | true | enables combat incapacitation, Gather/Defend rescue, physical evacuation, and recovery; false keeps immediate combat death |
 
 Disabling logistics does not erase existing road cells, which keeps world state
 and rendering comparable. Those roads provide **no movement-cost benefit** while
@@ -106,6 +107,11 @@ The fixed V1 mechanics are:
 Brain inputs 16, 20, and 21 now expose road coverage, stored wood per member,
 and reachable forest wood. The network dimensions remain fixed, so existing
 champion files remain compatible.
+
+Community Care uses a 240-tick rescue window, 12-cell assignment radius, and 35%
+revival health. Input 28 now reports normalized roster health. These mechanics add
+runtime entity/clan state but do not change the fixed brain dimensions or `LFB1`
+champion format.
 
 ## Terrain (applies on Populate)
 

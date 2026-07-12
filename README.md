@@ -64,6 +64,10 @@ cargo run --release        # first release build takes a few minutes, then it's 
   quality and then pass a paired logistics-on/off promotion gate. Survival, food
   security, clan fairness, expert routing, transport value, and reserve use can no
   longer be traded away for a higher headline score.
+- **Community Care V1:** lethal combat incapacitates clan members for a bounded
+  rescue window. Nearby Gather/Defend workers abandon routine jobs, reach the
+  casualty, physically carry them home, and restore them; untreated wounds bleed
+  out with ordinary death, kill, loss, and loot accounting.
 - **Combat**, **food-gated reproduction**, **food memory**, and **one NPC per
   tile**.
 - Game-like **toggleable panels**, an **NPC inspector** (its current "idea"),
@@ -77,7 +81,7 @@ cargo run --release        # first release build takes a few minutes, then it's 
 - **Viewport:** drag to pan, scroll to zoom, click an NPC to inspect it.
 - **Controls panel:** presets, populate counts, and every tunable world
   parameter (food/trees, hunger/health, movement/perception, clans/combat,
-  growth/expansion, Community Logistics enable/ablation, terrain).
+  growth/expansion, Community Logistics and Community Care ablations, terrain).
 - **Training window:** start/stop evolution, edit the training config, watch the
   fitness graph, and seed the best brain into the live world.
 
@@ -90,6 +94,7 @@ cargo test --release ai_quality_benchmark_is_deterministic -- --nocapture
 cargo test --release logistics_ablation_is_deterministic -- --nocapture
 cargo test --release tracked_champion_logistics_preserves_survival_gates -- --nocapture
 cargo test --release champion_promotion -- --nocapture
+cargo test --release tracked_champion_care_preserves_survival_gates -- --nocapture
 ```
 
 The V1.1 tests run paired logistics-on/off worlds with the same brain, seeds, and
@@ -99,6 +104,12 @@ cost; the ablation is an explicit release-validation gate.
 Marathon training pays that paired cost only when a fixed-world challenger first
 beats the incumbent. Rejected candidates are logged with concrete reasons and
 never overwrite `champion.bin`.
+
+Community Care has a separate same-world treatment/control benchmark. The tracked
+peaceful champion preserves **1.000** robust survival, **0.929** food security,
+and **+0.009** clan fairness; it produced no clan-member wound opportunities in
+the natural 13-world sample, so deterministic forced-combat tests provide the
+causal rescue proof without claiming an unobserved natural-play gain.
 
 Current tracked-champion result across 13 paired worlds: initial-clan survival
 **1.000 / 1.000** (enabled/disabled), food security **0.928 / 0.935**, hauling

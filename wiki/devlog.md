@@ -299,6 +299,24 @@ for incumbent regressions (causal logistics value, plus expert coverage for the
 first). The tracked champion's SHA-256 remained unchanged, demonstrating that the
 new path retains the incumbent when no fully qualified winner emerges.
 
+### A18 — Community Care V1
+
+Combat wounds now become a 240-tick incapacitation window for clan members.
+Nearby healthy Gather/Defend workers receive a true emergency override, reach the
+patient, and carry it cell-by-cell to the stockpile before reviving it at 35%
+health. A missed deadline preserves ordinary combat death, kill, loss, and delayed
+loot accounting. Care can be disabled independently for immediate-death control
+runs, and input 28 now reports average roster health.
+
+The implementation treats incapacitation as inactive state throughout the sim:
+patients cannot work, fight, raid, recruit, reproduce, build roads, occupy quotas,
+or count as surviving benchmark cohort members. Rescue quality is completed
+rescues per incapacitation, preventing injury farming. The release suite passes
+35 tests with one ignored marathon. The natural 13-world tracked-champion sample
+preserved 1.000 robust survival, 0.929 security, and +0.009 fairness but produced
+no clan-member wound opportunities; deterministic forced-combat tests therefore
+carry the causal evidence for assignment, transport, recovery, bleed-out, and loot.
+
 ## Open ideas / next
 
 - **Diplomacy / trade:** friendly clans exchange food; relationship memory; a

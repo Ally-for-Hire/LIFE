@@ -74,6 +74,10 @@ pub struct ClanStats {
     pub road_cost_saved_milli: u64,
     pub reserve_deposited: u32,
     pub reserve_released: u32,
+    /// Community Care outcomes. Incapacitations become losses only on bleed-out.
+    pub incapacitations: u32,
+    pub rescues: u32,
+    pub bleedouts: u32,
     /// Member-ticks by assigned role (output order from `Brain`).
     pub role_tick_sum: [u64; N_MODES],
 }

@@ -74,6 +74,9 @@ const ROAD_WOOD_COST: i32 = 2;
 const ROAD_MIN_TRAFFIC: u16 = 3;
 const RESERVE_FOOD_PER_MEMBER: i32 = 4;
 const STOCKPILE_FOOD_PER_MEMBER: i32 = 4;
+const RESCUE_WINDOW_TICKS: i32 = 240;
+const RESCUE_RADIUS: i32 = 12;
+const RESCUE_REVIVE_HEALTH: f32 = 0.35;
 /// Above this hunger, an outsider will steal from foreign farmland to survive —
 /// which makes them a trespasser and triggers the owner's defense. Below it,
 /// a clan's crops feed only its own people (despotic exclusion).
@@ -119,6 +122,7 @@ pub struct Params {
     pub soil_depletion_rate: f32, // how fast harvesting exhausts a tile (0 = off)
     pub disaster_rate: f32, // chance/intensity of regional blights (0 = off)
     pub community_logistics: bool, // shared reserves, wood labor, and roads
+    pub community_care: bool, // incapacitation, evacuation, and recovery
     // population growth
     pub birth_chance: f32,    // chance per pair of NPCs per reproduction check
     pub birth_interval: i32,  // ticks between reproduction checks
@@ -165,6 +169,7 @@ impl Default for Params {
             soil_depletion_rate: 0.0, // off by default; the curriculum ramps it in
             disaster_rate: 0.0,       // off by default; the curriculum ramps it in
             community_logistics: true,
+            community_care: true,
             birth_chance: D_BIRTH_CHANCE,
             birth_interval: D_BIRTH_INTERVAL,
             birth_food_cost: D_BIRTH_FOOD_COST,
@@ -531,6 +536,11 @@ impl World {
             work_until: 0,
             last_food: None,
             attack_cooldown: 0,
+            incapacitated_until: 0,
+            downed_by_clan: -1,
+            downed_by_entity: None,
+            rescue_target: None,
+            carried_by: None,
             dead: false,
         }
     }
@@ -930,7 +940,7 @@ impl World {
     fn entity_pos(&self, id: u32) -> Option<(i32, i32)> {
         self.entities
             .iter()
-            .find(|e| e.id == id && !e.dead)
+            .find(|e| e.id == id && e.is_active())
             .map(|e| (e.x, e.y))
     }
 
@@ -945,7 +955,7 @@ impl World {
     pub fn clan_population(&self, id: i32) -> usize {
         self.entities
             .iter()
-            .filter(|e| e.clan == id && !e.dead)
+            .filter(|e| e.clan == id && e.is_active())
             .count()
     }
 
@@ -965,7 +975,7 @@ impl World {
     }
 
     fn clan_can_add_member(&self, clan_idx: usize) -> bool {
-        self.clan_population(self.clans[clan_idx].id) < self.clan_member_cap(clan_idx)
+        (self.clan_roster_size(clan_idx) as usize) < self.clan_member_cap(clan_idx)
     }
 
     // --- spatial queries (bounded) ---
@@ -1242,6 +1252,7 @@ impl World {
         self.regrow_wood();
         self.maybe_disaster();
         self.clan_think();
+        self.prepare_rescues();
 
         let mut entities = std::mem::take(&mut self.entities);
         self.rebuild_occupancy(&entities);
@@ -1249,6 +1260,7 @@ impl World {
             self.update_entity(e);
         }
         self.entities = entities;
+        self.advance_rescues();
         self.build_roads();
 
         self.resolve_recruitment();
@@ -1285,7 +1297,7 @@ impl World {
         let mut on_terr = vec![0u32; self.clans.len()];
         let mut roles = vec![[0u32; N_MODES]; self.clans.len()];
         for e in &self.entities {
-            if e.dead || e.clan < 0 {
+            if !e.is_active() || e.clan < 0 {
                 continue;
             }
             if let Some(&idx) = idx_by_id.get(&e.clan) {
@@ -1347,7 +1359,7 @@ impl World {
             let mut hunger_sum = 0.0f32;
             let mut has_starving_member = false;
             for e in &self.entities {
-                if e.clan != id || e.dead {
+                if e.clan != id || !e.is_active() {
                     continue;
                 }
                 let hunger = e.hunger(starve_ticks).clamp(0.0, 2.0);
@@ -1405,7 +1417,7 @@ impl World {
         let neutrals: Vec<(i32, i32)> = self
             .entities
             .iter()
-            .filter(|e| e.clan < 0 && !e.dead)
+            .filter(|e| e.clan < 0 && e.is_active())
             .map(|e| (e.x, e.y))
             .collect();
         if self.pellet_total > neutrals.len() * 6 && neutrals.len() >= 2 {
@@ -1482,7 +1494,7 @@ impl World {
             .entities
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.clan < 0 && !e.dead)
+            .filter(|(_, e)| e.clan < 0 && e.is_active())
             .map(|(i, _)| i)
             .collect();
         if neutrals.len() < 4 {
@@ -1561,6 +1573,8 @@ impl World {
         let mut leader_pos: Vec<Option<(i32, i32)>> = vec![None; n];
         let mut pop = vec![0u32; n];
         let mut hunger_sum = vec![0f32; n];
+        let mut health_sum = vec![0f32; n];
+        let mut health_count = vec![0u32; n];
         let mut clan_members: Vec<(i32, i32, i32)> = Vec::new();
         let mut neutrals: Vec<(i32, i32)> = Vec::new();
 
@@ -1570,6 +1584,11 @@ impl World {
             }
             if e.clan >= 0 {
                 if let Some(&idx) = idx_by_id.get(&e.clan) {
+                    health_sum[idx] += (e.health / e.max_health.max(f32::EPSILON)).clamp(0.0, 1.0);
+                    health_count[idx] += 1;
+                    if !e.is_active() {
+                        continue;
+                    }
                     pop[idx] += 1;
                     hunger_sum[idx] += (e.ticks_since_food as f32 / starve_ticks).clamp(0.0, 2.0);
                     if e.is_leader {
@@ -1704,6 +1723,11 @@ impl World {
                 } else {
                     0.0
                 };
+                let avg_health = if health_count[idx] > 0 {
+                    health_sum[idx] / health_count[idx] as f32
+                } else {
+                    0.0
+                };
                 // how full is the clan relative to the population its land supports
                 let cap = self.clan_member_cap(idx) as f32;
                 let crowd = size / cap.max(1.0);
@@ -1762,7 +1786,7 @@ impl World {
                     0.0,         // 25 day/night phase (distinct from season)
                     self.clans[idx].soil_depletion.min(1.0), // 26 soil depletion of owned tiles
                     self.disaster_level, // 27 active disaster/event severity
-                    0.0,         // 28 average member morale / health
+                    avg_health,  // 28 average member health
                     0.0,         // 29 water / coast / river access of territory
                     0.0,         // 30 spare
                     1.0,         // 31 bias
@@ -1856,7 +1880,7 @@ impl World {
             .entities
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.clan == clan_id && !e.dead && e.id != leader_id)
+            .filter(|(_, e)| e.clan == clan_id && e.is_active() && e.id != leader_id)
             .map(|(i, _)| i)
             .collect();
         followers.sort_by_key(|&i| self.entities[i].id);
@@ -1910,7 +1934,7 @@ impl World {
         let leader_idx = self
             .entities
             .iter()
-            .position(|e| e.id == leader_id && e.clan == clan_id && !e.dead);
+            .position(|e| e.id == leader_id && e.clan == clan_id && e.is_active());
         if leader_idx.is_some() {
             target[headline.index()] += 1;
         }
@@ -2021,6 +2045,10 @@ impl World {
     fn update_entity(&mut self, e: &mut Entity) {
         e.ticks_since_food += 1;
         e.attack_cooldown = (e.attack_cooldown - 1).max(0);
+        if e.incapacitated_until > 0 {
+            e.goal = Goal::Incapacitated;
+            return;
+        }
         let starve_ticks = self.params.starve_ticks.max(1);
         let hunger = e.ticks_since_food as f32 / starve_ticks as f32;
 
@@ -2108,6 +2136,11 @@ impl World {
                 }
             }
             self.forage(e); // neutral-style survival fallback (avoids enemy land)
+            return;
+        }
+
+        if e.rescue_target.is_some() {
+            e.goal = Goal::Rescuing;
             return;
         }
 
@@ -2387,7 +2420,7 @@ impl World {
             };
             let (tx, ty, available) = {
                 let t = &self.entities[ti];
-                (t.x, t.y, t.clan < 0 && !t.dead)
+                (t.x, t.y, t.clan < 0 && t.is_active())
             };
             if !available {
                 continue;
@@ -2395,7 +2428,7 @@ impl World {
             let id = self.clans[ci].id;
             let near_member = self.entities.iter().any(|e| {
                 e.clan == id
-                    && !e.dead
+                    && e.is_active()
                     && e.work_role == ClanMode::Recruit
                     && (e.x - tx).abs().max((e.y - ty).abs()) <= radius
             });
@@ -2437,7 +2470,7 @@ impl World {
 
         let mut raids = Vec::new();
         for (ei, e) in self.entities.iter().enumerate() {
-            if e.dead || e.clan < 0 {
+            if !e.is_active() || e.clan < 0 {
                 continue;
             }
             let hunger = e.hunger(starve_ticks);
@@ -2463,6 +2496,235 @@ impl World {
             } else if let Some(ri) = self.clan_index(raider_clan) {
                 self.clans[ri].food += 1;
             }
+        }
+    }
+
+    /// Expire untreated casualties and assign one nearby Gather/Defend worker to
+    /// each remaining patient. Assignments happen before ordinary entity work so
+    /// rescue is a real emergency override, not a second action in the same tick.
+    fn prepare_rescues(&mut self) {
+        let expired: Vec<usize> = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter_map(|(i, entity)| {
+                (!entity.dead
+                    && entity.incapacitated_until > 0
+                    && self.tick >= entity.incapacitated_until)
+                    .then_some(i)
+            })
+            .collect();
+        for i in expired {
+            let victim_clan = self.entities[i].clan;
+            let attacker_clan = self.entities[i].downed_by_clan;
+            let attacker_entity = self.entities[i].downed_by_entity;
+            if let Some(rescuer_id) = self.entities[i].carried_by {
+                if let Some(rescuer) = self.entity_index(rescuer_id) {
+                    self.entities[rescuer].rescue_target = None;
+                }
+            }
+            self.entities[i].dead = true;
+            let loot = self.entities[i].food;
+            self.entities[i].food = 0;
+            if let Some(attacker) = attacker_entity.and_then(|id| self.entity_index(id)) {
+                if self.entities[attacker].is_active() {
+                    self.entities[attacker].food += loot;
+                } else if let Some(ci) = self.clan_index(attacker_clan) {
+                    self.clans[ci].food += loot;
+                }
+            } else if let Some(ci) = self.clan_index(attacker_clan) {
+                self.clans[ci].food += loot;
+            }
+            self.deaths_combat += 1;
+            if let Some(ci) = self.clan_index(victim_clan) {
+                self.clans[ci].stats.bleedouts += 1;
+            }
+            if let Some(ci) = self.clan_index(attacker_clan) {
+                self.clans[ci].stats.kills += 1;
+            }
+        }
+        if !self.params.community_care {
+            return;
+        }
+
+        for rescuer in 0..self.entities.len() {
+            let Some(patient_id) = self.entities[rescuer].rescue_target else {
+                continue;
+            };
+            let valid = self.entity_index(patient_id).is_some_and(|patient| {
+                !self.entities[patient].dead
+                    && self.entities[patient].incapacitated_until > self.tick
+                    && self.entities[patient].clan == self.entities[rescuer].clan
+                    && !self.entities[rescuer].dead
+                    && self.entities[rescuer].incapacitated_until == 0
+                    && matches!(
+                        self.entities[rescuer].work_role,
+                        ClanMode::Gather | ClanMode::Defend
+                    )
+            });
+            if !valid {
+                self.entities[rescuer].rescue_target = None;
+            }
+        }
+
+        let mut patients: Vec<usize> = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter_map(|(i, entity)| {
+                (!entity.dead && entity.incapacitated_until > self.tick).then_some(i)
+            })
+            .collect();
+        patients.sort_by_key(|&i| self.entities[i].id);
+        let mut assigned: Vec<bool> = self
+            .entities
+            .iter()
+            .map(|entity| entity.rescue_target.is_some())
+            .collect();
+        for patient in patients {
+            let patient_id = self.entities[patient].id;
+            if let Some(rescuer_id) = self.entities[patient].carried_by {
+                if let Some(rescuer) = self.entity_index(rescuer_id) {
+                    if !self.entities[rescuer].dead
+                        && self.entities[rescuer].incapacitated_until == 0
+                        && self.entities[rescuer].clan == self.entities[patient].clan
+                    {
+                        self.entities[rescuer].rescue_target = Some(patient_id);
+                        assigned[rescuer] = true;
+                        continue;
+                    }
+                }
+                self.entities[patient].carried_by = None;
+            }
+            if self
+                .entities
+                .iter()
+                .any(|entity| entity.rescue_target == Some(patient_id))
+            {
+                continue;
+            }
+
+            let casualty = &self.entities[patient];
+            let clan = casualty.clan;
+            let mut best = None;
+            for (rescuer, entity) in self.entities.iter().enumerate() {
+                if assigned[rescuer]
+                    || entity.dead
+                    || entity.incapacitated_until > 0
+                    || entity.clan != clan
+                    || !matches!(entity.work_role, ClanMode::Gather | ClanMode::Defend)
+                    || entity.health < entity.max_health * 0.5
+                {
+                    continue;
+                }
+                let distance = (entity.x - casualty.x)
+                    .abs()
+                    .max((entity.y - casualty.y).abs());
+                if distance > RESCUE_RADIUS {
+                    continue;
+                }
+                let key = (distance, entity.id, rescuer);
+                if best.map_or(true, |current| key < current) {
+                    best = Some(key);
+                }
+            }
+            if let Some((_, _, rescuer)) = best {
+                assigned[rescuer] = true;
+                self.entities[rescuer].rescue_target = Some(patient_id);
+            }
+        }
+    }
+
+    /// Move assigned rescuers toward their patients, then physically carry the
+    /// patient one cell behind them until both reach the clan stockpile.
+    fn advance_rescues(&mut self) {
+        let pairs: Vec<(usize, usize)> = self
+            .entities
+            .iter()
+            .enumerate()
+            .filter_map(|(rescuer, entity)| {
+                if entity.goal != Goal::Rescuing {
+                    return None;
+                }
+                let patient = self.entity_index(entity.rescue_target?)?;
+                Some((rescuer, patient))
+            })
+            .collect();
+        if pairs.is_empty() {
+            return;
+        }
+        let mut entities = std::mem::take(&mut self.entities);
+        self.rebuild_occupancy(&entities);
+        let mut completed = Vec::new();
+        for (rescuer, patient) in pairs {
+            if entities[patient].dead
+                || entities[rescuer].dead
+                || entities[patient].incapacitated_until <= self.tick
+                || entities[rescuer].incapacitated_until > 0
+            {
+                continue;
+            }
+            let rescuer_id = entities[rescuer].id;
+            let carrying = entities[patient].carried_by == Some(rescuer_id);
+            let target = if carrying {
+                self.clan_index(entities[patient].clan)
+                    .and_then(|ci| self.clans[ci].stockpile)
+                    .unwrap_or((entities[patient].x, entities[patient].y))
+            } else {
+                (entities[patient].x, entities[patient].y)
+            };
+            entities[rescuer].goal = Goal::Rescuing;
+            let old_rescuer_pos = (entities[rescuer].x, entities[rescuer].y);
+            self.move_toward(&mut entities[rescuer], target.0, target.1, true);
+            let distance = (entities[rescuer].x - target.0)
+                .abs()
+                .max((entities[rescuer].y - target.1).abs());
+            if carrying {
+                if (entities[rescuer].x, entities[rescuer].y) != old_rescuer_pos {
+                    let old_patient = self.grid.idx(entities[patient].x, entities[patient].y);
+                    let next_patient = self.grid.idx(old_rescuer_pos.0, old_rescuer_pos.1);
+                    self.occupied[old_patient] = self.occupied[old_patient].saturating_sub(1);
+                    self.occupied[next_patient] = self.occupied[next_patient].saturating_add(1);
+                    entities[patient].x = old_rescuer_pos.0;
+                    entities[patient].y = old_rescuer_pos.1;
+                }
+                if distance <= 1 {
+                    completed.push((patient, rescuer));
+                }
+            } else if distance <= 1 {
+                entities[patient].carried_by = Some(rescuer_id);
+                if self.clan_index(entities[patient].clan).is_some_and(|ci| {
+                    self.clans[ci].stockpile.is_some_and(|home| {
+                        (entities[rescuer].x - home.0)
+                            .abs()
+                            .max((entities[rescuer].y - home.1).abs())
+                            <= 1
+                    })
+                }) {
+                    completed.push((patient, rescuer));
+                }
+            }
+        }
+        self.entities = entities;
+
+        for (patient, rescuer) in completed {
+            if self.entities[patient].dead || self.entities[patient].incapacitated_until == 0 {
+                continue;
+            }
+            let clan = self.entities[patient].clan;
+            let Some(ci) = self.clan_index(clan) else {
+                continue;
+            };
+            self.entities[patient].health =
+                (self.entities[patient].max_health * RESCUE_REVIVE_HEALTH).max(1.0);
+            self.entities[patient].incapacitated_until = 0;
+            self.entities[patient].downed_by_clan = -1;
+            self.entities[patient].downed_by_entity = None;
+            self.entities[patient].carried_by = None;
+            self.entities[patient].attack_cooldown = self.params.attack_cooldown.max(1);
+            self.entities[patient].goal = Goal::Defending;
+            self.entities[rescuer].rescue_target = None;
+            self.clans[ci].stats.rescues += 1;
         }
     }
 
@@ -2494,7 +2756,11 @@ impl World {
                 let e = &self.entities[i];
                 (e.x, e.y, e.clan, e.attack_cooldown)
             };
-            if ec < 0 || cool > 0 || self.entities[i].dead {
+            if ec < 0
+                || cool > 0
+                || self.entities[i].dead
+                || self.entities[i].incapacitated_until > 0
+            {
                 continue; // only clan members attack
             }
             let aggr_self = self.clan_aggr(ec);
@@ -2519,7 +2785,7 @@ impl World {
                                 continue;
                             }
                             let o = &self.entities[j];
-                            if o.dead || o.clan == ec {
+                            if o.dead || o.incapacitated_until > 0 || o.clan == ec {
                                 continue;
                             }
                             let on_my_land = self.grid.owner[self.grid.idx(o.x, o.y)] == ec;
@@ -2542,21 +2808,35 @@ impl World {
         for (i, j) in attacks {
             if self.entities[i].attack_cooldown > 0
                 || self.entities[i].dead
+                || self.entities[i].incapacitated_until > 0
                 || self.entities[j].dead
+                || self.entities[j].incapacitated_until > 0
             {
                 continue;
             }
             self.entities[i].attack_cooldown = cd;
             self.entities[j].health -= dmg;
             if self.entities[j].health <= 0.0 {
-                self.entities[j].dead = true;
-                let loot = self.entities[j].food;
-                self.entities[j].food = 0;
-                self.entities[i].food += loot;
-                self.deaths_combat += 1;
                 let attacker_clan = self.entities[i].clan;
-                if let Some(ci) = self.clan_index(attacker_clan) {
-                    self.clans[ci].stats.kills += 1;
+                let victim_clan = self.entities[j].clan;
+                if self.params.community_care && victim_clan >= 0 {
+                    self.entities[j].health = 0.0;
+                    self.entities[j].incapacitated_until = self.tick + RESCUE_WINDOW_TICKS;
+                    self.entities[j].downed_by_clan = attacker_clan;
+                    self.entities[j].downed_by_entity = Some(self.entities[i].id);
+                    self.entities[j].goal = Goal::Incapacitated;
+                    if let Some(ci) = self.clan_index(victim_clan) {
+                        self.clans[ci].stats.incapacitations += 1;
+                    }
+                } else {
+                    self.entities[j].dead = true;
+                    let loot = self.entities[j].food;
+                    self.entities[j].food = 0;
+                    self.entities[i].food += loot;
+                    self.deaths_combat += 1;
+                    if let Some(ci) = self.clan_index(attacker_clan) {
+                        self.clans[ci].stats.kills += 1;
+                    }
                 }
             }
         }
@@ -2582,7 +2862,7 @@ impl World {
                 let mut successor = None;
                 for mid in members {
                     if let Some(mi) = self.entity_index(mid) {
-                        if !self.entities[mi].dead {
+                        if self.entities[mi].is_active() {
                             successor = Some((mi, mid));
                             break;
                         }
@@ -2658,6 +2938,11 @@ impl World {
             if !clan.disbanded
                 && clan.wood >= ROAD_WOOD_COST
                 && clan.workforce[ClanMode::Expand.index()] > 0
+                && self.entities.iter().any(|entity| {
+                    entity.clan == clan.id
+                        && entity.is_active()
+                        && entity.work_role == ClanMode::Expand
+                })
             {
                 clan_by_id.insert(clan.id, idx);
             }
@@ -2693,7 +2978,7 @@ impl World {
             if let Some(builder) = self
                 .entities
                 .iter_mut()
-                .filter(|e| e.clan == clan_id && !e.dead && e.work_role == ClanMode::Expand)
+                .filter(|e| e.clan == clan_id && e.is_active() && e.work_role == ClanMode::Expand)
                 .min_by_key(|e| (e.x - x).abs().max((e.y - y).abs()))
             {
                 builder.goal = Goal::BuildingRoad;
@@ -3154,6 +3439,12 @@ mod tests {
         w.grid.traffic[road_i] = ROAD_MIN_TRAFFIC + 5;
         w.clans[ci].wood = ROAD_WOOD_COST;
         w.clans[ci].workforce[ClanMode::Expand.index()] = 1;
+        let builder = w
+            .entities
+            .iter_mut()
+            .find(|entity| entity.clan == id && entity.is_active())
+            .expect("active road builder");
+        builder.work_role = ClanMode::Expand;
         w.tick = ROAD_BUILD_INTERVAL;
         w.build_roads();
         assert_eq!(w.grid.road[road_i], 1);
@@ -3179,5 +3470,139 @@ mod tests {
         assert!(w.grid.road.iter().all(|&v| v == 0));
         assert!(w.grid.wood.iter().all(|&v| v == 0));
         assert!(w.grid.traffic.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn community_care_turns_a_lethal_hit_into_one_rescue_window() {
+        let (mut world, attacker, casualty, _) = care_combat_world(true);
+        let second_attacker = world
+            .entities
+            .iter()
+            .position(|entity| entity.clan == world.clans[0].id && !entity.is_leader)
+            .expect("second queued attacker");
+        world.entities[second_attacker].x = 10;
+        world.entities[second_attacker].y = 11;
+        world.entities[second_attacker].work_role = ClanMode::Attack;
+        world.resolve_combat();
+        let deadline = world.entities[casualty].incapacitated_until;
+        world.entities[attacker].attack_cooldown = 0;
+        world.resolve_combat();
+
+        assert!(!world.entities[casualty].dead);
+        assert_eq!(world.entities[casualty].health, 0.0);
+        assert_eq!(world.entities[casualty].incapacitated_until, deadline);
+        assert!(deadline > world.tick);
+        assert_eq!(world.deaths_combat, 0);
+        assert_eq!(world.clans[1].stats.incapacitations, 1);
+        assert_eq!(world.clans[0].stats.kills, 0);
+        assert_eq!(world.clan_population(world.clans[1].id), 3);
+    }
+
+    #[test]
+    fn defender_physically_carries_an_incapacitated_clanmate_home() {
+        let (mut world, _, casualty, rescuer) = care_combat_world(true);
+        world.resolve_combat();
+        let home = world.clans[1].stockpile.expect("care requires a clan home");
+        let direction = if home.0 + 5 < world.grid.size { 1 } else { -1 };
+        for step in 0..=5 {
+            let x = home.0 + direction * step;
+            let i = world.grid.idx(x, home.1);
+            world.grid.terrain[i] = terrain::PLAINS;
+        }
+        world.entities[casualty].x = home.0 + direction * 4;
+        world.entities[casualty].y = home.1;
+        world.entities[rescuer].x = home.0 + direction * 5;
+        world.entities[rescuer].y = home.1;
+        world.entities[rescuer].work_role = ClanMode::Defend;
+        world.entities[rescuer].speed = 1.0;
+
+        let mut patient_positions = Vec::new();
+        for _ in 0..12 {
+            world.prepare_rescues();
+            for entity in &mut world.entities {
+                if entity.rescue_target.is_some() {
+                    entity.goal = Goal::Rescuing;
+                    entity.move_budget += 1.0;
+                }
+            }
+            world.advance_rescues();
+            patient_positions.push((world.entities[casualty].x, world.entities[casualty].y));
+            if world.entities[casualty].incapacitated_until == 0 {
+                break;
+            }
+            world.tick += 1;
+        }
+
+        assert_eq!(world.entities[casualty].incapacitated_until, 0);
+        assert!(world.entities[casualty].health > 0.0);
+        assert_eq!(world.entities[casualty].downed_by_clan, -1);
+        assert_eq!(world.entities[casualty].carried_by, None);
+        assert_eq!(world.entities[rescuer].rescue_target, None);
+        assert_eq!(world.clans[1].stats.rescues, 1);
+        assert!(patient_positions.windows(2).any(|pair| pair[0] != pair[1]));
+        let evacuated = (world.entities[casualty].x, world.entities[casualty].y);
+        assert!(
+            (evacuated.0 - home.0)
+                .abs()
+                .max((evacuated.1 - home.1).abs())
+                <= 2
+        );
+    }
+
+    #[test]
+    fn care_ablation_and_bleedout_preserve_death_kill_and_loot_accounting() {
+        let (mut disabled, attacker, casualty, _) = care_combat_world(false);
+        disabled.entities[casualty].food = 2;
+        disabled.resolve_combat();
+        assert!(disabled.entities[casualty].dead);
+        assert_eq!(disabled.deaths_combat, 1);
+        assert_eq!(disabled.clans[0].stats.kills, 1);
+        assert_eq!(disabled.entities[attacker].food, 2);
+
+        let (mut enabled, attacker, casualty, _) = care_combat_world(true);
+        enabled.entities[casualty].food = 2;
+        enabled.resolve_combat();
+        enabled.tick = enabled.entities[casualty].incapacitated_until;
+        enabled.prepare_rescues();
+        assert!(enabled.entities[casualty].dead);
+        assert_eq!(enabled.deaths_combat, 1);
+        assert_eq!(enabled.clans[1].stats.bleedouts, 1);
+        assert_eq!(enabled.clans[0].stats.kills, 1);
+        assert_eq!(enabled.entities[attacker].food, 2);
+    }
+
+    fn care_combat_world(community_care: bool) -> (World, usize, usize, usize) {
+        let mut world = World::new(40, 0xCA2E);
+        world.populate(0, 0, 2);
+        world.params.community_care = community_care;
+        world.params.clan_grace_ticks = 0;
+        world.params.war_threshold = 0.0;
+        world.params.attack_damage = 100.0;
+        world.tick = 1;
+
+        for (i, entity) in world.entities.iter_mut().enumerate() {
+            entity.x = 2 + (i as i32 * 3) % 34;
+            entity.y = 2 + (i as i32 * 5) % 34;
+            entity.attack_cooldown = 0;
+            entity.work_role = ClanMode::Gather;
+        }
+        let attacker = world
+            .entity_index(world.clans[0].leader_id)
+            .expect("first clan leader");
+        let casualty = world
+            .entity_index(world.clans[1].leader_id)
+            .expect("second clan leader");
+        let rescuer = world
+            .entities
+            .iter()
+            .position(|entity| entity.clan == world.clans[1].id && !entity.is_leader)
+            .expect("second clan follower");
+        world.entities[attacker].x = 10;
+        world.entities[attacker].y = 10;
+        world.entities[attacker].work_role = ClanMode::Attack;
+        world.entities[casualty].x = 11;
+        world.entities[casualty].y = 10;
+        world.entities[casualty].health = 1.0;
+        (world, attacker, casualty, rescuer)
     }
 }

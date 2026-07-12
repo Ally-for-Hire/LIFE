@@ -48,6 +48,9 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
 - **Guarded Retraining V1.2** — marathon champion promotion is fail-closed behind
   fixed-world quality and paired logistics gates, preserving survival, food
   security, clan fairness, routing health, transport value, and reserve behavior.
+- **Community Care V1** — lethal combat creates a bounded rescue window;
+  Gather/Defend workers physically carry casualties home, while inactive patients
+  are excluded from work, reproduction, hostility, and survival metrics.
 
 ## Next (civ layers)
 

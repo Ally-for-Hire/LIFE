@@ -44,8 +44,10 @@ One NPC: `id`, position, `speed`/`move_budget`, `health`, `is_leader`, carried
 `food` and `wood`, hunger state, `last_food` memory, `attack_cooldown`, and `clan`
 (id or -1). `work_role` is its sticky workforce assignment; `Goal` remains the
 human-readable immediate intent shown in the inspector (including gathering or
-hauling food/wood and building roads). Hunger and immediate defense may override
-the assigned role without erasing it.
+hauling food/wood, building roads, incapacitation, and rescue). Community Care
+adds a bleed-out deadline, attacker credit, and persistent rescuer/patient carrying
+links. Hunger, rescue, and immediate defense may override the assigned role without
+erasing it.
 
 ## `Clan` + `ClanMode` (`clan.rs`)
 
@@ -57,7 +59,8 @@ RDH population cap), `aggression`, current `mode`, cached targets (`enemy_pos`,
 `last_claim_tick`, and `stats` (kills / losses / recruits / peak / founded /
 `on_terr_tick_sum`, role time, wood delivered, roads built, and reserve
 deposits/releases, plus V1.1 `food_delivered`, `road_steps`, and
-`road_cost_saved_milli` causal counters). `ClanMode` is one of Gather / Recruit / Expand / Defend /
+`road_cost_saved_milli` causal counters and V1 care incapacitation/rescue/bleed-out
+counters). `ClanMode` is one of Gather / Recruit / Expand / Defend /
 Attack / Scout; `mode` is now the headline order while members can simultaneously
 hold different roles.
 

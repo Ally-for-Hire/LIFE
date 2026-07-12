@@ -43,6 +43,8 @@ world) finds the strategies. See [prior-art.md](prior-art.md) and
 - **Community logistics:** sticky roles, renewable wood, traffic-shaped roads,
   and protected famine/disaster reserves create complementary village jobs;
   V1.1 adds a live ablation plus hauling/road-benefit evidence.
+- **Community care:** Gather/Defend workers can physically evacuate incapacitated
+  clanmates before bleed-out; a live ablation restores immediate combat death.
 - **Death only from scarcity or combat:** NPCs remember food and home to it, so
   they never wander off and starve for no reason.
 - **Build/run:** `cd life-rs && cargo run --release`.
