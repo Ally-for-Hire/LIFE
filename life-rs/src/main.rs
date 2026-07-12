@@ -15,6 +15,7 @@ mod entity;
 mod grid;
 mod quality;
 mod rng;
+mod settlement;
 mod trainer;
 mod world;
 

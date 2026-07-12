@@ -68,6 +68,8 @@ pub struct AiBenchmarkReport {
     pub mean_task_coverage: f32,
     pub mean_care: f32,
     pub mean_trade: f32,
+    pub mean_infrastructure: f32,
+    pub mean_technology: f32,
     pub routing_entropy: f32,
     pub expert_coverage: f32,
     pub eligible: bool,
@@ -169,6 +171,36 @@ pub struct TradeBenchmarkReport {
     pub survival_non_regression: bool,
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct SettlementBenchmarkArm {
+    pub robust_survival: f32,
+    pub mean_security: f32,
+    pub clan_cohort_survival: f32,
+    pub neutral_cohort_survival: f32,
+    pub fairness_delta: f32,
+    pub robust_fairness_delta: f32,
+    pub infrastructure: f32,
+    pub technology: f32,
+    pub construction_work: f32,
+    pub completed_buildings: f32,
+    pub research_ticks: f32,
+    pub useful_value: f32,
+    pub eligible: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct SettlementBenchmarkReport {
+    pub worlds: usize,
+    pub enabled: SettlementBenchmarkArm,
+    pub disabled: SettlementBenchmarkArm,
+    pub clan_survival_delta: f32,
+    pub security_delta: f32,
+    pub useful_value_delta: f32,
+    pub survival_non_regression: bool,
+}
+
 #[derive(Clone)]
 pub struct TrainCfg {
     pub pop_size: usize,
@@ -238,6 +270,8 @@ pub struct Trainer {
     pub mean_task_coverage: f32,
     pub mean_care: f32,
     pub mean_trade: f32,
+    pub mean_infrastructure: f32,
+    pub mean_technology: f32,
     pub routing_balance: f32,
     pub history: Vec<[f64; 2]>,     // (generation, best fitness)
     pub avg_history: Vec<[f64; 2]>, // (generation, average fitness)
@@ -284,6 +318,8 @@ impl Trainer {
             mean_task_coverage: 0.0,
             mean_care: 0.0,
             mean_trade: 0.0,
+            mean_infrastructure: 0.0,
+            mean_technology: 0.0,
             routing_balance: 0.0,
             history: Vec::new(),
             avg_history: Vec::new(),
@@ -534,6 +570,26 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                             0x7ADE_BEEF,
                         )
                     });
+                    let challenger_settlement = benchmark_settlement_quality(
+                        challenger
+                            .as_ref()
+                            .expect("benchmarked challenger should exist"),
+                        &base,
+                        stage,
+                        gate_episode,
+                        LOGISTICS_GATE_WORLDS,
+                        0x5E77_BEEF,
+                    );
+                    let reigning_settlement = champion.as_ref().map(|brain| {
+                        benchmark_settlement_quality(
+                            brain,
+                            &base,
+                            stage,
+                            gate_episode,
+                            LOGISTICS_GATE_WORLDS,
+                            0x5E77_BEEF,
+                        )
+                    });
                     let rejections = champion_promotion_rejections(
                         &hq,
                         reigning.as_ref(),
@@ -541,10 +597,17 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                         reigning_logistics.as_ref(),
                         &challenger_trade,
                         reigning_trade.as_ref(),
+                        &challenger_settlement,
+                        reigning_settlement.as_ref(),
                     );
                     let accepted = rejections.is_empty();
-                    gate_result =
-                        Some((accepted, rejections, challenger_logistics, challenger_trade));
+                    gate_result = Some((
+                        accepted,
+                        rejections,
+                        challenger_logistics,
+                        challenger_trade,
+                        challenger_settlement,
+                    ));
                     if accepted {
                         champion = challenger;
                         champ_score = hq.fitness;
@@ -569,7 +632,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
             append(
                 log_path,
                 &format!(
-                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} haul {:.2} roads {:.2} reserve {:.2} tasks {:.2} care {:.2} trade {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
+                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} haul {:.2} roads {:.2} reserve {:.2} tasks {:.2} care {:.2} trade {:.2} infrastructure {:.2} tech {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
                     champ_score,
                     cq.robust_survival,
                     cq.security,
@@ -580,13 +643,15 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                     cq.task_coverage,
                     cq.care,
                     cq.trade,
+                    cq.infrastructure,
+                    cq.technology,
                     cq.routing_entropy,
                     cq.expert_coverage,
                     BENCH_WORLDS,
                     tr.stage
                 ),
             );
-            if let Some((accepted, rejections, logistics, trade)) = gate_result {
+            if let Some((accepted, rejections, logistics, trade, settlement)) = gate_result {
                 let verdict = if accepted { "accepted" } else { "rejected" };
                 append(
                     log_path,
@@ -602,6 +667,17 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                         } else {
                             rejections.join(", ")
                         },
+                    ),
+                );
+                append(
+                    log_path,
+                    &format!(
+                        "    [settlement gate] {verdict}: survival {:+.3}, security {:+.3}, work {:.1}, buildings {:.1}, useful {:+.1}\n",
+                        settlement.clan_survival_delta,
+                        settlement.security_delta,
+                        settlement.enabled.construction_work,
+                        settlement.enabled.completed_buildings,
+                        settlement.useful_value_delta,
                     ),
                 );
                 append(
@@ -732,6 +808,8 @@ impl Trainer {
         self.mean_task_coverage = best_quality.task_coverage;
         self.mean_care = best_quality.care;
         self.mean_trade = best_quality.trade;
+        self.mean_infrastructure = best_quality.infrastructure;
+        self.mean_technology = best_quality.technology;
         self.routing_balance = best_quality.routing_entropy * best_quality.expert_coverage;
         let improvement_margin = self.best_ever.abs().max(1.0) * 0.002;
         if self.best_fitness > self.best_ever + improvement_margin {
@@ -1116,6 +1194,8 @@ impl QualityTotals {
         self.sum.task_coverage += score.task_coverage;
         self.sum.care += score.care;
         self.sum.trade += score.trade;
+        self.sum.infrastructure += score.infrastructure;
+        self.sum.technology += score.technology;
         self.sum.defense += score.defense;
         self.sum.combat += score.combat;
         self.robust_survival = self.robust_survival.min(score.survival);
@@ -1149,6 +1229,8 @@ impl QualityTotals {
             task_coverage: self.sum.task_coverage * inv,
             care: self.sum.care * inv,
             trade: self.sum.trade * inv,
+            infrastructure: self.sum.infrastructure * inv,
+            technology: self.sum.technology * inv,
             defense: self.sum.defense * inv,
             combat: self.sum.combat * inv,
             routing_entropy,
@@ -1502,6 +1584,8 @@ pub fn benchmark_ai_quality(
         mean_task_coverage: quality.task_coverage,
         mean_care: quality.care,
         mean_trade: quality.trade,
+        mean_infrastructure: quality.infrastructure,
+        mean_technology: quality.technology,
         routing_entropy: quality.routing_entropy,
         expert_coverage: quality.expert_coverage,
         eligible: quality.eligible && fairness_delta >= -0.05,
@@ -2037,6 +2121,190 @@ fn run_trade_benchmark_arm(
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy)]
+struct SettlementBenchmarkObservation {
+    quality: QualityScore,
+    clan_cohort_survival: f32,
+    neutral_cohort_survival: f32,
+    construction_work: f32,
+    completed_buildings: f32,
+    research_ticks: f32,
+    useful_value: f32,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct SettlementArmTotals {
+    quality: QualityTotals,
+    clan_cohort_survival: f32,
+    neutral_cohort_survival: f32,
+    construction_work: f32,
+    completed_buildings: f32,
+    research_ticks: f32,
+    useful_value: f32,
+    count: u32,
+}
+
+#[cfg(test)]
+impl SettlementArmTotals {
+    fn add(&mut self, observation: SettlementBenchmarkObservation) {
+        self.quality.add(observation.quality);
+        self.clan_cohort_survival += observation.clan_cohort_survival;
+        self.neutral_cohort_survival += observation.neutral_cohort_survival;
+        self.construction_work += observation.construction_work;
+        self.completed_buildings += observation.completed_buildings;
+        self.research_ticks += observation.research_ticks;
+        self.useful_value += observation.useful_value;
+        self.count += 1;
+    }
+
+    fn finish(self, brain: &Brain) -> SettlementBenchmarkArm {
+        if self.count == 0 {
+            return SettlementBenchmarkArm::default();
+        }
+        let inv = 1.0 / self.count as f32;
+        let quality = self.quality.finish(brain);
+        let clan_cohort_survival = self.clan_cohort_survival * inv;
+        let neutral_cohort_survival = self.neutral_cohort_survival * inv;
+        SettlementBenchmarkArm {
+            robust_survival: quality.robust_survival,
+            mean_security: quality.security,
+            clan_cohort_survival,
+            neutral_cohort_survival,
+            fairness_delta: clan_cohort_survival - neutral_cohort_survival,
+            robust_fairness_delta: quality.robust_fairness,
+            infrastructure: quality.infrastructure,
+            technology: quality.technology,
+            construction_work: self.construction_work * inv,
+            completed_buildings: self.completed_buildings * inv,
+            research_ticks: self.research_ticks * inv,
+            useful_value: self.useful_value * inv,
+            eligible: quality.eligible
+                && clan_cohort_survival - neutral_cohort_survival >= FAIRNESS_FLOOR,
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn benchmark_settlement_quality(
+    brain: &Brain,
+    base: &Params,
+    stage: u32,
+    episode: i32,
+    n_worlds: usize,
+    seed: u64,
+) -> SettlementBenchmarkReport {
+    if n_worlds == 0 {
+        return SettlementBenchmarkReport::default();
+    }
+    let paired: Vec<(
+        SettlementBenchmarkObservation,
+        SettlementBenchmarkObservation,
+    )> = (0..n_worlds)
+        .into_par_iter()
+        .map(|world_index| {
+            let mut rng = Rng::new(seed ^ (world_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let effective_stage = (world_index as u32) % (stage + 1);
+            let spec = random_world_spec(base, &mut rng, effective_stage);
+            let arena_seed =
+                seed.wrapping_add((world_index as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+            (
+                run_settlement_benchmark_arm(brain, &spec, episode, arena_seed, true),
+                run_settlement_benchmark_arm(brain, &spec, episode, arena_seed, false),
+            )
+        })
+        .collect();
+    let mut enabled_totals = SettlementArmTotals::default();
+    let mut disabled_totals = SettlementArmTotals::default();
+    for (enabled, disabled) in paired {
+        enabled_totals.add(enabled);
+        disabled_totals.add(disabled);
+    }
+    let enabled = enabled_totals.finish(brain);
+    let disabled = disabled_totals.finish(brain);
+    let clan_survival_delta = enabled.clan_cohort_survival - disabled.clan_cohort_survival;
+    SettlementBenchmarkReport {
+        worlds: n_worlds,
+        clan_survival_delta,
+        security_delta: enabled.mean_security - disabled.mean_security,
+        useful_value_delta: enabled.useful_value - disabled.useful_value,
+        survival_non_regression: enabled.robust_survival + 1e-6 >= disabled.robust_survival
+            && clan_survival_delta >= -1e-6,
+        enabled,
+        disabled,
+    }
+}
+
+#[cfg(test)]
+fn run_settlement_benchmark_arm(
+    brain: &Brain,
+    spec: &WorldSpec,
+    episode: i32,
+    seed: u64,
+    community_settlement: bool,
+) -> SettlementBenchmarkObservation {
+    let mut world = World::new(spec.world_size, seed);
+    world.params = spec.params.clone();
+    world.community_settlement = community_settlement;
+    let brains = [brain.clone(), brain.clone(), brain.clone()];
+    let ids = world.setup_arena(&brains, spec.trees, spec.neutrals);
+    let clan_id = ids[0];
+    let clan_cohort: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.clan == clan_id)
+        .map(|entity| entity.id)
+        .collect();
+    let neutral_cohort: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.clan < 0)
+        .map(|entity| entity.id)
+        .collect();
+    for _ in 0..episode {
+        world.step();
+    }
+    let alive: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.is_active())
+        .map(|entity| entity.id)
+        .collect();
+    let cohort_ratio = |cohort: &HashSet<u32>| {
+        if cohort.is_empty() {
+            1.0
+        } else {
+            cohort.iter().filter(|id| alive.contains(id)).count() as f32 / cohort.len() as f32
+        }
+    };
+    let clan_cohort_survival = cohort_ratio(&clan_cohort);
+    let neutral_cohort_survival = cohort_ratio(&neutral_cohort);
+    let mut quality = score_clan_quality(&world, clan_id);
+    quality.fairness = clan_cohort_survival - neutral_cohort_survival;
+    quality.robust_fairness = quality.fairness;
+    quality.eligible &= quality.fairness >= FAIRNESS_FLOOR;
+    let state = world
+        .settlements
+        .iter()
+        .find(|state| state.clan_id == clan_id)
+        .copied()
+        .unwrap_or_default();
+    let useful_value = state.stats.granary_food_stored as f32
+        + state.stats.market_material_delivered as f32
+        + state.stats.shelter_healing_milli as f32 / 1000.0
+        + state.stats.wall_damage_prevented_milli as f32 / 1000.0;
+    SettlementBenchmarkObservation {
+        quality,
+        clan_cohort_survival,
+        neutral_cohort_survival,
+        construction_work: state.stats.construction_work as f32,
+        completed_buildings: state.stats.buildings_completed as f32,
+        research_ticks: state.stats.research_ticks as f32,
+        useful_value,
+    }
+}
+
+#[cfg(test)]
 fn quality_better(challenger: &QualityScore, reigning: &QualityScore) -> bool {
     match (challenger.eligible, reigning.eligible) {
         (true, false) => true,
@@ -2053,6 +2321,8 @@ fn champion_promotion_rejections(
     reigning_logistics: Option<&LogisticsBenchmarkReport>,
     trade: &TradeBenchmarkReport,
     reigning_trade: Option<&TradeBenchmarkReport>,
+    settlement: &SettlementBenchmarkReport,
+    reigning_settlement: Option<&SettlementBenchmarkReport>,
 ) -> Vec<&'static str> {
     let mut reasons = Vec::new();
     if !challenger.eligible {
@@ -2198,6 +2468,61 @@ fn champion_promotion_rejections(
             reasons.push("causal trade value regressed from champion");
         }
     }
+
+    if !settlement.enabled.eligible {
+        reasons.push("settlement-enabled benchmark ineligible");
+    }
+    if settlement.enabled.robust_survival < PROMOTION_SURVIVAL_FLOOR {
+        reasons.push("settlement-enabled survival below promotion floor");
+    }
+    if settlement.enabled.mean_security < PROMOTION_SECURITY_FLOOR {
+        reasons.push("settlement-enabled security below promotion floor");
+    }
+    if settlement.enabled.fairness_delta < PROMOTION_FAIRNESS_FLOOR {
+        reasons.push("settlement-enabled clans underperform neutrals");
+    }
+    if !settlement.survival_non_regression {
+        reasons.push("settlement reduces paired survival");
+    }
+    if settlement.security_delta < -PROMOTION_SECURITY_TOLERANCE {
+        reasons.push("settlement reduces paired food security");
+    }
+    if settlement.enabled.construction_work <= 0.0 || settlement.enabled.completed_buildings <= 0.0
+    {
+        reasons.push("settlement does not complete physical construction");
+    }
+    if settlement.useful_value_delta <= 0.0 {
+        reasons.push("settlement produces no causal public-good value");
+    }
+    if let Some(current) = reigning_settlement {
+        if settlement.enabled.robust_survival + f32::EPSILON < current.enabled.robust_survival {
+            reasons.push("paired settlement survival regressed from champion");
+        }
+        if settlement.enabled.mean_security + PROMOTION_SECURITY_TOLERANCE
+            < current.enabled.mean_security
+        {
+            reasons.push("paired settlement security regressed from champion");
+        }
+        if settlement.enabled.fairness_delta + PROMOTION_SECURITY_TOLERANCE
+            < current.enabled.fairness_delta
+        {
+            reasons.push("paired settlement fairness regressed from champion");
+        }
+        if settlement.enabled.infrastructure + PROMOTION_COVERAGE_TOLERANCE
+            < current.enabled.infrastructure
+        {
+            reasons.push("causal settlement value regressed from champion");
+        }
+        if settlement.enabled.technology + PROMOTION_COVERAGE_TOLERANCE < current.enabled.technology
+        {
+            reasons.push("settlement technology regressed from champion");
+        }
+        if settlement.enabled.research_ticks + PROMOTION_COVERAGE_TOLERANCE
+            < current.enabled.research_ticks
+        {
+            reasons.push("physical workshop research regressed from champion");
+        }
+    }
     reasons
 }
 
@@ -2315,6 +2640,8 @@ mod tests {
         assert!((a.mean_task_coverage - b.mean_task_coverage).abs() < 1e-6);
         assert!((a.mean_care - b.mean_care).abs() < 1e-6);
         assert!((a.mean_trade - b.mean_trade).abs() < 1e-6);
+        assert!((a.mean_infrastructure - b.mean_infrastructure).abs() < 1e-6);
+        assert!((a.mean_technology - b.mean_technology).abs() < 1e-6);
         assert!((0.0..=1.0).contains(&a.routing_entropy));
         assert!((0.0..=1.0).contains(&a.expert_coverage));
         assert!(
@@ -2519,6 +2846,78 @@ mod tests {
         );
     }
 
+    #[test]
+    fn settlement_ablation_is_deterministic() {
+        let brain = Brain::load(CHAMPION_PATH).expect("tracked champion.bin should load");
+        let base = Params::default();
+        let a = benchmark_settlement_quality(&brain, &base, 3, 1500, 4, 0x5E77_5EED);
+        let b = benchmark_settlement_quality(&brain, &base, 3, 1500, 4, 0x5E77_5EED);
+        assert!((a.clan_survival_delta - b.clan_survival_delta).abs() < 1e-6);
+        assert!((a.security_delta - b.security_delta).abs() < 1e-6);
+        assert!((a.enabled.construction_work - b.enabled.construction_work).abs() < 1e-6);
+        assert!((a.enabled.useful_value - b.enabled.useful_value).abs() < 1e-6);
+        assert_eq!(a.disabled.construction_work, 0.0);
+        assert_eq!(a.disabled.useful_value, 0.0);
+    }
+
+    #[test]
+    fn tracked_champion_settlement_preserves_survival_gates() {
+        let brain = Brain::load(CHAMPION_PATH).expect("tracked champion.bin should load");
+        let report = benchmark_settlement_quality(
+            &brain,
+            &Params::default(),
+            MAX_STAGE,
+            4000,
+            13,
+            0x5E77_BEEF,
+        );
+        println!("Buildings/Technology V1 paired benchmark: {report:#?}");
+        assert_eq!(report.worlds, 13);
+        assert!(
+            report.enabled.eligible,
+            "settlement enabled became ineligible: {report:#?}"
+        );
+        assert!(
+            report.enabled.robust_survival >= PROMOTION_SURVIVAL_FLOOR,
+            "settlement robust survival regressed: {report:#?}"
+        );
+        assert!(
+            report.enabled.mean_security >= PROMOTION_SECURITY_FLOOR,
+            "settlement food security regressed: {report:#?}"
+        );
+        assert!(
+            report.enabled.fairness_delta >= FAIRNESS_FLOOR,
+            "settlement clan fairness regressed: {report:#?}"
+        );
+        assert!(report.enabled.neutral_cohort_survival >= 0.0);
+        assert!(report.enabled.robust_fairness_delta >= FAIRNESS_FLOOR);
+        assert!(report.enabled.infrastructure > 0.0);
+        assert_eq!(
+            report.enabled.technology, 0.0,
+            "update the documented natural-play result if tracked worlds begin researching"
+        );
+        assert_eq!(
+            report.enabled.research_ticks, 0.0,
+            "physical workshop research is proven by the focused world test"
+        );
+        assert!(
+            report.survival_non_regression,
+            "settlement reduced paired survival: {report:#?}"
+        );
+        assert!(
+            report.security_delta >= -PROMOTION_SECURITY_TOLERANCE,
+            "settlement reduced paired food security: {report:#?}"
+        );
+        assert!(
+            report.enabled.construction_work > 0.0 && report.enabled.completed_buildings > 0.0,
+            "settlement treatment produced no physical construction: {report:#?}"
+        );
+        assert!(
+            report.useful_value_delta > 0.0,
+            "settlement treatment produced no causal public-good value: {report:#?}"
+        );
+    }
+
     fn promotion_quality(fitness: f32) -> QualityScore {
         QualityScore {
             fitness,
@@ -2613,6 +3012,41 @@ mod tests {
         }
     }
 
+    fn promotion_settlement(infrastructure: f32, useful: f32) -> SettlementBenchmarkReport {
+        let enabled = SettlementBenchmarkArm {
+            robust_survival: 1.0,
+            mean_security: 0.90,
+            clan_cohort_survival: 1.0,
+            neutral_cohort_survival: 0.95,
+            fairness_delta: 0.05,
+            robust_fairness_delta: 0.0,
+            infrastructure,
+            construction_work: 40.0,
+            completed_buildings: 2.0,
+            useful_value: useful,
+            eligible: true,
+            ..SettlementBenchmarkArm::default()
+        };
+        SettlementBenchmarkReport {
+            worlds: 13,
+            enabled,
+            disabled: SettlementBenchmarkArm {
+                robust_survival: 1.0,
+                mean_security: 0.90,
+                clan_cohort_survival: 1.0,
+                neutral_cohort_survival: 0.95,
+                fairness_delta: 0.05,
+                robust_fairness_delta: 0.0,
+                eligible: true,
+                ..SettlementBenchmarkArm::default()
+            },
+            clan_survival_delta: 0.0,
+            security_delta: 0.0,
+            useful_value_delta: useful,
+            survival_non_regression: true,
+        }
+    }
+
     #[test]
     fn champion_promotion_accepts_a_safe_causal_improvement() {
         let incumbent = promotion_quality(100.0);
@@ -2621,6 +3055,8 @@ mod tests {
         let challenger_logistics = promotion_logistics(0.52, 0.32);
         let incumbent_trade = promotion_trade(0.40, 10.0);
         let challenger_trade = promotion_trade(0.45, 12.0);
+        let incumbent_settlement = promotion_settlement(0.30, 6.0);
+        let challenger_settlement = promotion_settlement(0.34, 8.0);
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
@@ -2628,6 +3064,8 @@ mod tests {
             Some(&incumbent_logistics),
             &challenger_trade,
             Some(&incumbent_trade),
+            &challenger_settlement,
+            Some(&incumbent_settlement),
         );
         assert!(
             rejections.is_empty(),
@@ -2642,6 +3080,7 @@ mod tests {
         challenger.robust_survival = 0.90;
         let logistics = promotion_logistics(0.52, 0.32);
         let trade = promotion_trade(0.45, 12.0);
+        let settlement = promotion_settlement(0.34, 8.0);
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
@@ -2649,6 +3088,8 @@ mod tests {
             Some(&logistics),
             &trade,
             Some(&trade),
+            &settlement,
+            Some(&settlement),
         );
         assert!(rejections.contains(&"robust survival below promotion floor"));
         assert!(rejections.contains(&"robust survival regressed from champion"));
@@ -2663,6 +3104,7 @@ mod tests {
         challenger_logistics.security_delta = -0.02;
         challenger_logistics.survival_non_regression = false;
         let trade = promotion_trade(0.45, 12.0);
+        let settlement = promotion_settlement(0.34, 8.0);
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
@@ -2670,6 +3112,8 @@ mod tests {
             Some(&incumbent_logistics),
             &trade,
             Some(&trade),
+            &settlement,
+            Some(&settlement),
         );
         assert!(rejections.contains(&"logistics reduces paired survival"));
         assert!(rejections.contains(&"logistics reduces paired food security"));
@@ -2684,6 +3128,7 @@ mod tests {
         let logistics = promotion_logistics(0.52, 0.32);
         let incumbent_trade = promotion_trade(0.50, 12.0);
         let mut challenger_trade = promotion_trade(0.0, 0.0);
+        let settlement = promotion_settlement(0.34, 8.0);
         challenger_trade.security_delta = -0.02;
         let rejections = champion_promotion_rejections(
             &challenger,
@@ -2692,10 +3137,64 @@ mod tests {
             Some(&logistics),
             &challenger_trade,
             Some(&incumbent_trade),
+            &settlement,
+            Some(&settlement),
         );
         assert!(rejections.contains(&"trade reduces paired food security"));
         assert!(rejections.contains(&"trade does not deliver physical material"));
         assert!(rejections.contains(&"causal trade value regressed from champion"));
+    }
+
+    #[test]
+    fn champion_promotion_rejects_hollow_or_harmful_settlement() {
+        let incumbent = promotion_quality(100.0);
+        let challenger = promotion_quality(110.0);
+        let logistics = promotion_logistics(0.52, 0.32);
+        let trade = promotion_trade(0.45, 12.0);
+        let incumbent_settlement = promotion_settlement(0.40, 8.0);
+        let mut challenger_settlement = promotion_settlement(0.0, 0.0);
+        challenger_settlement.enabled.construction_work = 0.0;
+        challenger_settlement.enabled.completed_buildings = 0.0;
+        challenger_settlement.security_delta = -0.02;
+        challenger_settlement.survival_non_regression = false;
+        let rejections = champion_promotion_rejections(
+            &challenger,
+            Some(&incumbent),
+            &logistics,
+            Some(&logistics),
+            &trade,
+            Some(&trade),
+            &challenger_settlement,
+            Some(&incumbent_settlement),
+        );
+        assert!(rejections.contains(&"settlement reduces paired survival"));
+        assert!(rejections.contains(&"settlement reduces paired food security"));
+        assert!(rejections.contains(&"settlement does not complete physical construction"));
+        assert!(rejections.contains(&"settlement produces no causal public-good value"));
+        assert!(rejections.contains(&"causal settlement value regressed from champion"));
+    }
+
+    #[test]
+    fn champion_promotion_rejects_technology_and_research_regression() {
+        let quality = promotion_quality(110.0);
+        let logistics = promotion_logistics(0.52, 0.32);
+        let trade = promotion_trade(0.45, 12.0);
+        let mut incumbent_settlement = promotion_settlement(0.34, 8.0);
+        incumbent_settlement.enabled.technology = 0.50;
+        incumbent_settlement.enabled.research_ticks = 24.0;
+        let challenger_settlement = promotion_settlement(0.34, 8.0);
+        let rejections = champion_promotion_rejections(
+            &quality,
+            Some(&quality),
+            &logistics,
+            Some(&logistics),
+            &trade,
+            Some(&trade),
+            &challenger_settlement,
+            Some(&incumbent_settlement),
+        );
+        assert!(rejections.contains(&"settlement technology regressed from champion"));
+        assert!(rejections.contains(&"physical workshop research regressed from champion"));
     }
 
     #[test]

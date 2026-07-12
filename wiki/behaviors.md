@@ -159,6 +159,39 @@ attacker before engaging, so stale coordinates cannot endanger passers. Inputs 2
 report partner relation, partner count, and recent delivered volume without
 changing the `LFB1` brain dimensions.
 
+## Buildings & Technology V1
+
+Every 120 ticks, an eligible clan may reserve wood for one physical construction
+site only after reaching four members, filling ordinary food plus emergency reserve
+floors, and retaining a wood margin. Stable site selection prefers nearby owned,
+passable, unoccupied cells and breaks ties by distance then grid index. The project
+spends its wood up front; Expand workers must walk adjacent and contribute work.
+
+- **House (12 wood / 24 work):** adds two population capacity and heals nearby
+  clan members by 0.02 health/tick within six cells.
+- **Granary (18 / 36):** adds six protected reserve-food capacity.
+- **Workshop (24 / 48):** gives the clan leader a physical research workplace.
+- **Wall (10 / 20):** unlocked at technology level 1; reduces nearby incoming
+  damage by 25% within four cells.
+- **Market (30 / 60):** unlocked at level 2; increases physical courier loads.
+
+The build sequence establishes granary, workshop, housing, threat-driven walls,
+and trade-driven markets before repeating capacity buildings. A Scout-mode leader
+walks adjacent to a completed workshop and contributes one research point every 30
+ticks; levels cost 40, 90, and 160 points and cap at 3. Level 2 also doubles
+physical construction work. Inputs 17 and 18 report
+normalized development and technology without changing the 32-input `LFB1` format.
+The live ablation zeros those signals and disables all mechanics/effects while
+preserving structural state for paired comparison. On a mid-world toggle, protected
+food above the ordinary four-per-member reserve cap is discarded immediately so a
+disabled granary cannot keep granting survival value.
+
+The tracked 13-world treatment/control pair preserves 1.000 clan survival,
+records 0.930/0.926 food security and +0.002 enabled fairness, and averages 60.9
+work, 1.85 completed buildings, and +7.38 causal public-good value. It observed no
+natural Scout research, so a focused deterministic physical-workshop test proves
+research progression without inflating the natural benchmark claim.
+
 If a leader dies a follower is promoted; a clan disbands only when no members
 remain (its territory is then freed). To keep the world a living patchwork,
 `maintain_clans` re-forms villages from masterless **refugees** when war thins the

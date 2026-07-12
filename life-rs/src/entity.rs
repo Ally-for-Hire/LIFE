@@ -24,6 +24,8 @@ pub enum Goal {
     Recruiting,
     Defending,
     Claiming,
+    Constructing,
+    Researching,
 }
 
 impl Goal {
@@ -46,6 +48,8 @@ impl Goal {
             Goal::Recruiting => "recruiting",
             Goal::Defending => "defending",
             Goal::Claiming => "claiming land",
+            Goal::Constructing => "constructing a building",
+            Goal::Researching => "researching technology",
         }
     }
 }

@@ -12,6 +12,7 @@ use crate::diplomacy::DiplomacyLedger;
 use crate::entity::Entity;
 use crate::grid::{terrain, Grid, NO_OWNER};
 use crate::rng::Rng;
+use crate::settlement::{Building, ClanSettlement, MAX_TECH_LEVEL};
 use bincode::Options;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -21,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 const MAGIC: &[u8; 8] = b"LIFEWRLD";
 const VERSION_V1: u16 = 1;
+const VERSION_V2: u16 = 2;
 const HEADER_LEN: usize = 24;
 const MAX_PAYLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_GRID_SIZE: i32 = 4096;
@@ -47,27 +49,44 @@ struct WorldSnapshotV1 {
     disaster_level: f32,
 }
 
+#[derive(Serialize, Deserialize)]
+struct WorldSnapshotV2 {
+    base: WorldSnapshotV1,
+    buildings: Vec<Building>,
+    building_cells: Vec<u32>,
+    settlements: Vec<ClanSettlement>,
+    community_settlement: bool,
+    next_building_id: u32,
+}
+
 impl World {
     /// Atomically writes a validated, versioned snapshot of every persistent
     /// world field. Scratch flood-fill and occupancy buffers are rebuilt after
     /// load and intentionally do not appear in the wire format.
     pub fn save_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
-        let snapshot = WorldSnapshotV1::capture(self);
+        let snapshot = WorldSnapshotV2::capture(self);
         snapshot.validate()?;
         let payload = encode_snapshot(&snapshot)?;
-        write_envelope(path.as_ref(), &payload)
+        write_envelope(path.as_ref(), VERSION_V2, &payload)
     }
 
     /// Loads and validates a full-world snapshot. The returned world owns the
     /// exact saved RNG state, so continuing it produces the same future ticks.
     pub fn load_file(path: impl AsRef<Path>) -> io::Result<Self> {
-        let payload = read_envelope(path.as_ref())?;
-        let snapshot: WorldSnapshotV1 = codec()
-            .with_limit(MAX_PAYLOAD_BYTES)
-            .deserialize(&payload)
-            .map_err(|error| invalid(format!("invalid V1 payload: {error}")))?;
-        snapshot.validate()?;
-        Ok(snapshot.restore())
+        let (version, payload) = read_envelope(path.as_ref())?;
+        match version {
+            VERSION_V1 => {
+                let snapshot: WorldSnapshotV1 = decode_snapshot(&payload, "V1")?;
+                snapshot.validate()?;
+                Ok(snapshot.restore())
+            }
+            VERSION_V2 => {
+                let snapshot: WorldSnapshotV2 = decode_snapshot(&payload, "V2")?;
+                snapshot.validate()?;
+                Ok(snapshot.restore())
+            }
+            _ => Err(invalid(format!("unsupported world version {version}"))),
+        }
     }
 }
 
@@ -96,6 +115,7 @@ impl WorldSnapshotV1 {
     }
 
     fn restore(self) -> World {
+        let cell_count = self.grid.terrain.len();
         World {
             grid: self.grid,
             tick: self.tick,
@@ -105,8 +125,13 @@ impl WorldSnapshotV1 {
             rng: self.rng,
             params: self.params,
             diplomacy: self.diplomacy,
+            buildings: Vec::new(),
+            building_cells: vec![0; cell_count],
+            settlements: Vec::new(),
+            community_settlement: true,
             next_entity_id: self.next_entity_id,
             next_clan_id: self.next_clan_id,
+            next_building_id: 1,
             pellet_total: self.pellet_total as usize,
             deaths_starved: self.deaths_starved,
             deaths_combat: self.deaths_combat,
@@ -359,6 +384,110 @@ impl WorldSnapshotV1 {
     }
 }
 
+impl WorldSnapshotV2 {
+    fn capture(world: &World) -> Self {
+        Self {
+            base: WorldSnapshotV1::capture(world),
+            buildings: world.buildings.clone(),
+            building_cells: world.building_cells.clone(),
+            settlements: world.settlements.clone(),
+            community_settlement: world.community_settlement,
+            next_building_id: world.next_building_id,
+        }
+    }
+
+    fn restore(self) -> World {
+        let mut world = self.base.restore();
+        world.buildings = self.buildings;
+        world.building_cells = self.building_cells;
+        world.settlements = self.settlements;
+        world.community_settlement = self.community_settlement;
+        world.next_building_id = self.next_building_id;
+        world
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        self.base.validate()?;
+        let cells = self.base.grid.terrain.len();
+        if self.building_cells.len() != cells {
+            return Err(invalid("building layer length mismatch"));
+        }
+        let clan_ids: HashSet<i32> = self.base.clans.iter().map(|clan| clan.id).collect();
+        let mut ids = HashSet::with_capacity(self.buildings.len());
+        for building in &self.buildings {
+            if building.id.0 == 0
+                || !ids.insert(building.id.0)
+                || building.id.0 >= self.next_building_id
+                || !clan_ids.contains(&building.clan_id)
+                || !point_in_bounds(building.position(), self.base.grid.size)
+                || building.construction > building.kind.cost().work
+                || building.hp > building.kind.max_hp()
+                || self.building_cells[self.base.grid.idx(building.x, building.y)] != building.id.0
+            {
+                return Err(invalid("invalid building state"));
+            }
+        }
+        if self.next_building_id == 0
+            || ids
+                .iter()
+                .max()
+                .is_some_and(|&id| self.next_building_id <= id)
+        {
+            return Err(invalid("next building id is not ahead of live ids"));
+        }
+        for (cell, &id) in self.building_cells.iter().enumerate() {
+            if id == 0 {
+                continue;
+            }
+            let Some(building) = self.buildings.iter().find(|building| building.id.0 == id) else {
+                return Err(invalid("building layer references a missing building"));
+            };
+            if self.base.grid.idx(building.x, building.y) != cell {
+                return Err(invalid("building footprint does not match its position"));
+            }
+        }
+        let mut previous = None;
+        let mut targeted_buildings = HashSet::new();
+        for state in &self.settlements {
+            if state.clan_id < 1
+                || !clan_ids.contains(&state.clan_id)
+                || previous.is_some_and(|prior| prior >= state.clan_id)
+                || state.tech.level > MAX_TECH_LEVEL
+                || state
+                    .tech
+                    .next_level_cost()
+                    .is_some_and(|cost| state.tech.research >= cost)
+                || state.tech.level == MAX_TECH_LEVEL && state.tech.research != 0
+                || state.build_target.is_some_and(|id| {
+                    id.0 == 0
+                        || id.0 >= self.next_building_id
+                        || !self.buildings.iter().any(|building| {
+                            building.id == id
+                                && building.clan_id == state.clan_id
+                                && !building.is_complete()
+                                && !building.is_destroyed()
+                        })
+                })
+            {
+                return Err(invalid("invalid clan settlement state"));
+            }
+            if let Some(target) = state.build_target {
+                targeted_buildings.insert(target.0);
+            }
+            previous = Some(state.clan_id);
+        }
+        if self
+            .buildings
+            .iter()
+            .filter(|building| !building.is_complete() && !building.is_destroyed())
+            .any(|building| !targeted_buildings.contains(&building.id.0))
+        {
+            return Err(invalid("incomplete building has no active clan project"));
+        }
+        Ok(())
+    }
+}
+
 fn validate_entity(entity: &Entity, size: i32) -> io::Result<()> {
     if !point_in_bounds((entity.x, entity.y), size)
         || entity
@@ -430,11 +559,18 @@ fn validate_clan(clan: &Clan, size: i32) -> io::Result<()> {
     Ok(())
 }
 
-fn encode_snapshot(snapshot: &WorldSnapshotV1) -> io::Result<Vec<u8>> {
+fn encode_snapshot(snapshot: &impl Serialize) -> io::Result<Vec<u8>> {
     codec()
         .with_limit(MAX_PAYLOAD_BYTES)
         .serialize(snapshot)
-        .map_err(|error| invalid(format!("could not encode V1 payload: {error}")))
+        .map_err(|error| invalid(format!("could not encode world payload: {error}")))
+}
+
+fn decode_snapshot<'a, T: Deserialize<'a>>(payload: &'a [u8], label: &str) -> io::Result<T> {
+    codec()
+        .with_limit(MAX_PAYLOAD_BYTES)
+        .deserialize(payload)
+        .map_err(|error| invalid(format!("invalid {label} payload: {error}")))
 }
 
 fn codec() -> impl Options {
@@ -444,13 +580,13 @@ fn codec() -> impl Options {
         .reject_trailing_bytes()
 }
 
-fn write_envelope(path: &Path, payload: &[u8]) -> io::Result<()> {
+fn write_envelope(path: &Path, version: u16, payload: &[u8]) -> io::Result<()> {
     if payload.len() as u64 > MAX_PAYLOAD_BYTES {
         return Err(invalid("world payload exceeds size limit"));
     }
     let mut bytes = Vec::with_capacity(HEADER_LEN + payload.len());
     bytes.extend_from_slice(MAGIC);
-    bytes.extend_from_slice(&VERSION_V1.to_le_bytes());
+    bytes.extend_from_slice(&version.to_le_bytes());
     bytes.extend_from_slice(&0u16.to_le_bytes());
     bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes());
     bytes.extend_from_slice(&crc32fast::hash(payload).to_le_bytes());
@@ -470,7 +606,7 @@ fn write_envelope(path: &Path, payload: &[u8]) -> io::Result<()> {
     result
 }
 
-fn read_envelope(path: &Path) -> io::Result<Vec<u8>> {
+fn read_envelope(path: &Path) -> io::Result<(u16, Vec<u8>)> {
     let mut file = File::open(path)?;
     let file_len = file.metadata()?.len();
     if file_len < HEADER_LEN as u64 {
@@ -482,9 +618,6 @@ fn read_envelope(path: &Path) -> io::Result<Vec<u8>> {
         return Err(invalid("not a LIFE world file"));
     }
     let version = u16::from_le_bytes([header[8], header[9]]);
-    if version != VERSION_V1 {
-        return Err(invalid(format!("unsupported world version {version}")));
-    }
     if u16::from_le_bytes([header[10], header[11]]) != 0 {
         return Err(invalid("unsupported world envelope flags"));
     }
@@ -498,7 +631,7 @@ fn read_envelope(path: &Path) -> io::Result<Vec<u8>> {
     if crc32fast::hash(&payload) != expected_checksum {
         return Err(invalid("world payload checksum mismatch"));
     }
-    Ok(payload)
+    Ok((version, payload))
 }
 
 fn temporary_path(path: &Path) -> PathBuf {
@@ -659,7 +792,7 @@ mod tests {
 
         representative_world().save_file(&path).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
-        bytes[8..10].copy_from_slice(&2u16.to_le_bytes());
+        bytes[8..10].copy_from_slice(&3u16.to_le_bytes());
         std::fs::write(&path, &bytes).unwrap();
         let error = World::load_file(&path).err().unwrap();
         assert!(error.to_string().contains("unsupported world version"));
@@ -672,7 +805,7 @@ mod tests {
         let world = representative_world();
         let mut snapshot = WorldSnapshotV1::capture(&world);
         snapshot.next_entity_id = 1;
-        write_envelope(&path, &encode_snapshot(&snapshot).unwrap()).unwrap();
+        write_envelope(&path, VERSION_V1, &encode_snapshot(&snapshot).unwrap()).unwrap();
         assert!(World::load_file(&path)
             .err()
             .unwrap()
@@ -681,7 +814,7 @@ mod tests {
 
         let mut snapshot = WorldSnapshotV1::capture(&world);
         snapshot.grid.owner.pop();
-        write_envelope(&path, &encode_snapshot(&snapshot).unwrap()).unwrap();
+        write_envelope(&path, VERSION_V1, &encode_snapshot(&snapshot).unwrap()).unwrap();
         assert!(World::load_file(&path)
             .err()
             .unwrap()
@@ -711,8 +844,125 @@ mod tests {
         snapshot.params.water_level = 0.6;
         snapshot.params.mountain_level = 0.5;
 
-        write_envelope(&path, &encode_snapshot(&snapshot).unwrap()).unwrap();
+        write_envelope(&path, VERSION_V1, &encode_snapshot(&snapshot).unwrap()).unwrap();
         World::load_file(&path).unwrap();
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v1_world_migrates_to_empty_enabled_settlement_state() {
+        let path = test_path("v1-migration");
+        let original = representative_world();
+        let snapshot = WorldSnapshotV1::capture(&original);
+        write_envelope(&path, VERSION_V1, &encode_snapshot(&snapshot).unwrap()).unwrap();
+
+        let loaded = World::load_file(&path).unwrap();
+
+        assert!(loaded.community_settlement);
+        assert!(loaded.buildings.is_empty());
+        assert!(loaded.settlements.is_empty());
+        assert!(loaded.building_cells.iter().all(|&id| id == 0));
+        assert_eq!(loaded.next_building_id, 1);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v2_roundtrip_preserves_active_construction_and_research() {
+        let path = test_path("v2-settlement");
+        let mut world = representative_world();
+        world.buildings.clear();
+        world.building_cells.fill(0);
+        world.settlements.clear();
+        world.next_building_id = 1;
+        let clan_id = world.clans[0].id;
+        let stockpile = world.clans[0].stockpile.unwrap();
+        let cell = world.grid.idx(stockpile.0, stockpile.1);
+        let mut building = crate::settlement::Building::new(
+            crate::settlement::BuildingId(world.next_building_id),
+            clan_id,
+            stockpile.0,
+            stockpile.1,
+            crate::settlement::BuildingKind::Workshop,
+        );
+        building.add_construction(17);
+        world.next_building_id += 1;
+        world.building_cells[cell] = building.id.0;
+        world.settlements.push(crate::settlement::ClanSettlement {
+            clan_id,
+            tech: crate::settlement::TechState {
+                level: 1,
+                research: 23,
+            },
+            build_target: Some(building.id),
+            stats: crate::settlement::SettlementStats {
+                construction_work: 17,
+                research_ticks: 23,
+                ..crate::settlement::SettlementStats::default()
+            },
+        });
+        world.settlements.sort_by_key(|state| state.clan_id);
+        world.buildings.push(building);
+
+        world.save_file(&path).unwrap();
+        let loaded = World::load_file(&path).unwrap();
+
+        assert_eq!(persistent_bytes(&world), persistent_bytes(&loaded));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn malformed_v2_settlement_references_are_rejected() {
+        let path = test_path("v2-invalid-settlement");
+        let world = representative_world();
+        let mut snapshot = WorldSnapshotV2::capture(&world);
+        snapshot.building_cells.pop();
+        write_envelope(&path, VERSION_V2, &encode_snapshot(&snapshot).unwrap()).unwrap();
+        assert!(World::load_file(&path)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("building layer length"));
+
+        let mut snapshot = WorldSnapshotV2::capture(&world);
+        snapshot
+            .settlements
+            .push(crate::settlement::ClanSettlement {
+                clan_id: world.clans[0].id,
+                tech: crate::settlement::TechState {
+                    level: MAX_TECH_LEVEL + 1,
+                    research: 0,
+                },
+                ..crate::settlement::ClanSettlement::default()
+            });
+        write_envelope(&path, VERSION_V2, &encode_snapshot(&snapshot).unwrap()).unwrap();
+        assert!(World::load_file(&path)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("invalid clan settlement"));
+
+        let mut snapshot = WorldSnapshotV2::capture(&world);
+        snapshot.buildings.clear();
+        snapshot.building_cells.fill(0);
+        snapshot.settlements.clear();
+        snapshot.next_building_id = 2;
+        let clan_id = world.clans[0].id;
+        let (x, y) = world.clans[0].stockpile.unwrap();
+        let orphan = crate::settlement::Building::new(
+            crate::settlement::BuildingId(1),
+            clan_id,
+            x,
+            y,
+            crate::settlement::BuildingKind::House,
+        );
+        snapshot.building_cells[world.grid.idx(x, y)] = orphan.id.0;
+        snapshot.buildings.push(orphan);
+        write_envelope(&path, VERSION_V2, &encode_snapshot(&snapshot).unwrap()).unwrap();
+        assert!(World::load_file(&path)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("incomplete building has no active clan project"));
         cleanup(&path);
     }
 
@@ -740,7 +990,7 @@ mod tests {
     }
 
     fn persistent_bytes(world: &World) -> Vec<u8> {
-        encode_snapshot(&WorldSnapshotV1::capture(world)).unwrap()
+        encode_snapshot(&WorldSnapshotV2::capture(world)).unwrap()
     }
 
     fn test_path(label: &str) -> PathBuf {

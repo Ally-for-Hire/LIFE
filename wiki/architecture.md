@@ -11,7 +11,8 @@ no JSON snapshot or HTTP layer like the old JS prototype had.
 | `main.rs` | Entry point; sets up the eframe/egui native window. |
 | `app.rs` | The egui application: rendering, panels, knobs, graphs, the training window, and the variable-rate sim driver. |
 | `world.rs` | `World` + `Params`: the grid, entities, trees, clans, the per-tick `step`, and all gameplay rules. |
-| `world/persistence.rs` | `LIFEWRLD` V1 full-world DTO, validation, checksum envelope, atomic replacement, and deterministic continuation tests. |
+| `world/persistence.rs` | Versioned `LIFEWRLD` DTOs and migration, validation, checksum envelope, atomic replacement, and deterministic continuation tests. |
+| `settlement.rs` | Deterministic building, cost, technology, development, and settlement-stat data contracts. |
 | `entity.rs` | `Entity` (one NPC) and its `Goal` (the "idea" shown in the inspector). |
 | `clan.rs` | `Clan`, `ClanMode`, clan stats, and the clan color helper. |
 | `diplomacy.rs` | Deterministic sorted relationship ledger: trust, temporary pacts, delivered volume, and decay/pruning. |
@@ -38,7 +39,10 @@ tile?". Here each layer is a flat `Vec` indexed by `y * size + x`:
 
 The world also keeps an **occupancy grid** (`Vec<u16>`, rebuilt each tick) that
 enforces **one NPC per tile**, a reusable flood-fill buffer for territory
-pruning, and an O(1) running `pellet_total`.
+pruning, and an O(1) running `pellet_total`. Settlement data stays at World level:
+`buildings` owns stable sites, `building_cells` is a one-cell footprint lookup,
+`settlements` is sorted per-clan tech/project/stat state, and
+`community_settlement` is the live treatment switch.
 
 Entities and clans are plain `Vec`s; the dead are removed with in-place
 `retain`/swap-remove instead of per-tick reallocation.
@@ -56,11 +60,14 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
    enemy, neutral, trespasser, fertility-scored frontier). Targets are cached on
    the clan so per-entity updates never scan the world. A preceding diplomacy
    refresh selects partners, decays relationship memory, and caches route threats; inputs
-   22–24 expose relation, partner count, and delivered volume.
-4. **prepare rescues**, **rebuild occupancy**, then **update each entity**
+   22–24 expose relation, partner count, and delivered volume. Inputs 17–18 expose
+   settlement development and technology. Food-secure clans may reserve wood for
+   a new physical construction site at this cadence.
+4. **plan settlement projects**, **prepare rescues**, **rebuild occupancy**, then **update each entity**
    (hunger first; assigned care response next; then its ordinary community role,
-   movement, delivery, and road work). **advance rescues** physically carries
-   patients toward the clan stockpile.
+   movement, delivery, road work, physical Expand construction, or physical Scout
+   workshop research). **advance rescues** physically carries patients toward the
+   clan stockpile.
 5. **recruitment** (deliberate only), **combat** (trespasser / on-campaign / war),
    **raiding** (stockpile theft), **detach the dead** (losses, succession,
    disbanding), **record stats**.
@@ -84,15 +91,19 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
   benchmark follows initial clan and neutral cohorts separately so recruitment
   cannot hide a clan-vs-neutral survival regression.
 - Marathon promotion is two-stage. A challenger must first beat the incumbent on
-  the 24 fixed headline worlds, then pass a 13-world paired logistics-on/off gate.
+  the 24 fixed headline worlds, then pass 13-world paired logistics, trade, and
+  settlement treatment/control gates.
   The second gate enforces absolute survival/security/fairness/routing floors,
   incumbent non-regression tolerances, positive transport and reserve effects,
-  and causal logistics-value retention. Only a passing challenger is serialized.
+  causal logistics-value retention, settlement infrastructure, and technology/
+  physical-research non-regression. Only a passing challenger is serialized.
 - Every `World` owns its own `Rng`; there is **no global RNG**. Same seed →
   identical run (covered by a test).
 - Full-world persistence stores every behavior-affecting field in vector order,
   including exact xoshiro state and cached decisions. Only `reach` and `occupied`
-  scratch buffers are omitted and rebuilt; V1 loads reject corruption before replacement.
+  scratch buffers are omitted and rebuilt. V2 adds buildings, the one-cell
+  footprint layer, clan technology/stats, and the settlement ablation; V1 loads
+  migrate explicitly to empty enabled settlement state.
 - `community_logistics=false` is a deterministic infrastructure ablation. Wood
   regrowth still consumes the same per-forest RNG draws but does not mutate the
   layer, preventing avoidable RNG drift from the regrowth branch. Later divergence
@@ -106,6 +117,18 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
   pact, courier, relationship target, allied-passage, and route-defense effect.
   Trade uses no feature-specific random draws, so paired arms diverge only after
   delivered resources and diplomacy alter behavior.
+- `community_settlement=false` keeps inputs 17–18 at zero and disables project
+  planning, construction, research, and every building effect while retaining the
+  structural treatment state for a clean live counterfactual. Excess reserve food
+  above the non-granary cap is discarded on a mid-world toggle.
+
+## Settlement validation counters
+
+Each clan records physical construction work, completed buildings, workshop
+research ticks, tech levels, granary reserve use, shelter healing, market material,
+and wall damage prevention. The paired benchmark requires survival/security/fairness
+floors, completed physical construction, and positive causal public-good value;
+marathon promotion also guards incumbent infrastructure non-regression.
 
 ## Logistics validation counters
 
@@ -128,6 +151,6 @@ accounting when the peaceful tracked champion creates no natural opportunities.
 ## Rendering
 
 Each frame the world is painted into a `Color32` pixel buffer (terrain base →
-territory tint → wood/roads → pellets → trees → stockpiles → entities), uploaded as a
+territory tint → wood/roads → pellets → trees → buildings → stockpiles → entities), uploaded as a
 NEAREST-filtered texture, and drawn into the viewport with pan/zoom. One cell =
 one texel.

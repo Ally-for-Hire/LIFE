@@ -20,6 +20,8 @@ shape the layout like a game HUD.
   carry harvestable wood, tan cells are roads, bright green cells are food,
   yellow cells are stockpiles, and leaders are lightened. During the logistics
   ablation, retained roads turn gray because they provide no movement benefit.
+  Houses are blue, granaries gold, workshops purple, markets teal, and walls gray;
+  incomplete sites brighten as physical construction advances.
 
 ## Controls panel (left)
 
@@ -36,7 +38,9 @@ shape the layout like a game HUD.
   states exactly which mechanics/no-road-benefit semantics are active. **Community
   care** independently toggles incapacitation/rescue versus immediate combat death.
   **Trade and diplomacy** independently toggles pacts, physical exchange, allied
-  passage, and route defense versus the no-trade control. **reset**
+  passage, and route defense versus the no-trade control. **Buildings and
+  technology** independently toggles planning, physical work, research, signals,
+  and all building effects. **reset**
   restores defaults; your tuning survives Populate. See
   [Parameters](save-format.md).
 - **View:** reset the camera; a legend of NPC/terrain colors.
@@ -49,7 +53,9 @@ shape the layout like a game HUD.
   members, ordinary/reserve food, shared wood, public-work counters, territory,
   aggression, K/L/recruited, food delivered, real road member-steps, measured
   movement-cost savings, care incapacitations/rescues/bleed-outs, current trade
-  partner/trust, physical cargo, delivered food/wood totals, and the
+  partner/trust, physical cargo, delivered food/wood totals, active building
+  counts, technology/research, current construction project and development
+  counters, plus the
   **master → sub-mind routing** (which
   expert the leader is delegating to), and the **blended action utilities**.
 - A live **clan list** (color, mode, people, food/reserve, wood, roads, K/L).
@@ -64,8 +70,8 @@ Rolling plots of **population & leaders & clans**, **food on the map**, and
 - **Start / Stop** evolution (runs on a background thread across all CPU cores).
 - **Stats:** generation, best/avg/best-ever fitness, robust survival, food and
   reserve security, community logistics, **hauling throughput**, **road utility**,
-  task coverage, community care, delivered trade, routing/archive health, and
-  last-generation time.
+  task coverage, community care, delivered trade, settlement infrastructure and
+  technology, routing/archive health, and last-generation time.
 - **Config:** population, episode ticks, clans per arena, repeats, arena size,
   arena trees/neutrals, mutation rate & strength, elite count.
 - **Seed best brain → live world:** inject the current champion as a new clan so

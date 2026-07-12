@@ -77,6 +77,10 @@ pub struct QualityScore {
     pub care: f32,
     /// Physically delivered inter-clan food/wood per member-time.
     pub trade: f32,
+    /// Completed development plus causally used shelter/storage/market/wall benefits.
+    pub infrastructure: f32,
+    /// Normalized settlement technology level.
+    pub technology: f32,
     pub defense: f32,
     pub combat: f32,
     pub routing_entropy: f32,
@@ -103,6 +107,8 @@ impl Default for QualityScore {
             task_coverage: 0.0,
             care: 0.0,
             trade: 0.0,
+            infrastructure: 0.0,
+            technology: 0.0,
             defense: 0.0,
             combat: 0.0,
             routing_entropy: 0.0,
@@ -245,6 +251,29 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
         .saturating_add(c.stats.trade_wood_sent)
         .saturating_add(c.stats.trade_wood_received);
     let trade = saturating_rate(rate_per_1k(trade_events), 2.0);
+    let settlement_state = if w.community_settlement {
+        w.settlements
+            .iter()
+            .find(|state| state.clan_id == cid)
+            .copied()
+            .unwrap_or_default()
+    } else {
+        crate::settlement::ClanSettlement::default()
+    };
+    let development = if w.community_settlement {
+        crate::settlement::development_score(&w.buildings, cid) as f32
+    } else {
+        0.0
+    };
+    let useful_events = settlement_state.stats.granary_food_stored as f32
+        + settlement_state.stats.market_material_delivered as f32
+        + settlement_state.stats.shelter_healing_milli as f32 / 1000.0
+        + settlement_state.stats.wall_damage_prevented_milli as f32 / 1000.0;
+    let development_value = saturating_rate(development * 1000.0 / member_ticks, 0.5);
+    let useful_value = saturating_rate(useful_events * 1000.0 / member_ticks, 1.0);
+    let infrastructure = (development_value * 0.4 + useful_value * 0.6).clamp(0.0, 1.0);
+    let technology =
+        settlement_state.tech.level as f32 / crate::settlement::MAX_TECH_LEVEL.max(1) as f32;
 
     let role_total = c.stats.role_tick_sum.iter().sum::<u64>() as f32;
     let task_coverage = if role_total > 0.0 {
@@ -279,7 +308,7 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
     let settled_score = settled * avg_pop * 8.0;
     let land_score = c.fertile_capacity.sqrt() * 8.0 + terr.sqrt() * 2.0;
     let reserve_score = reserve_per_cap.min(12.0) * 5.0 + avg_food.sqrt() * 2.0;
-    let cooperation_score = recruits * 5.0;
+    let cooperation_score = recruits * 5.0 + infrastructure * 20.0 + technology * 10.0;
     let combat_score = kills * 1.2;
     let hunger_penalty = avg_hunger * 40.0 + c.stats.starving_ticks as f32 * 0.06;
     let loss_penalty = losses * 18.0;
@@ -299,12 +328,13 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
         .clamp(0.0, 1.0);
     let expansion = (c.fertile_capacity.sqrt() / 14.0 + terr.sqrt() / 160.0).clamp(0.0, 1.0);
     let recruitment = (recruits / (recruits + 8.0)).clamp(0.0, 1.0);
-    let cooperation = (recruitment * 0.15
-        + logistics * 0.20
-        + reserve_security * 0.15
-        + task_coverage * 0.15
-        + care * 0.15
-        + trade * 0.20)
+    let cooperation = (recruitment * 0.12
+        + logistics * 0.18
+        + reserve_security * 0.14
+        + task_coverage * 0.14
+        + care * 0.14
+        + trade * 0.14
+        + infrastructure * 0.14)
         .clamp(0.0, 1.0);
     let defense = (survival * (1.0 - losses / (losses + pop + 1.0))).clamp(0.0, 1.0);
     let combat = if kills <= 0.0 {
@@ -330,6 +360,8 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
         task_coverage,
         care,
         trade,
+        infrastructure,
+        technology,
         defense,
         combat,
         routing_entropy: 0.0,
@@ -421,7 +453,7 @@ mod tests {
 /// gate collapses per decision; coverage measures how many experts receive a
 /// meaningful average share across different situations.
 pub fn routing_metrics(brain: &Brain) -> (f32, f32) {
-    let mut probes = [[0.0f32; N_IN]; 11];
+    let mut probes = [[0.0f32; N_IN]; 13];
     for probe in &mut probes {
         probe[0] = 0.30;
         probe[1] = 0.50;
@@ -455,6 +487,11 @@ pub fn routing_metrics(brain: &Brain) -> (f32, f32) {
     probes[10][22] = 0.10;
     probes[10][23] = 0.50;
     probes[10][24] = 0.40;
+    probes[11][17] = 0.90; // developed settlement with room to specialize
+    probes[11][4] = 0.55;
+    probes[12][18] = 0.90; // technologically mature settlement under pressure
+    probes[12][6] = 0.55;
+    probes[12][8] = 0.45;
 
     let mut entropy_sum = 0.0;
     let mut mean_gate = [0.0f32; N_EXPERTS];

@@ -17,6 +17,10 @@ use crate::diplomacy::DiplomacyLedger;
 use crate::entity::{Entity, Goal};
 use crate::grid::{terrain, Grid, NO_OWNER};
 use crate::rng::Rng;
+use crate::settlement::{
+    active_building_counts, building_counts, development_score, Building, BuildingId, BuildingKind,
+    ClanSettlement, TechState, MAX_TECH_LEVEL,
+};
 use std::collections::HashMap;
 
 mod persistence;
@@ -89,6 +93,14 @@ const TRADE_FOOD_FLOOR_PER_MEMBER: i32 = 8;
 const TRADE_WOOD_FLOOR: i32 = 6;
 const TRADE_FOOD_LOAD: i32 = 2;
 const TRADE_WOOD_LOAD: i32 = 1;
+const SETTLEMENT_PLAN_INTERVAL: i32 = 120;
+const RESEARCH_INTERVAL: i32 = 30;
+const HOUSE_MEMBER_CAPACITY: usize = 2;
+const GRANARY_RESERVE_CAPACITY: i32 = 6;
+const SETTLEMENT_WOOD_MARGIN: i32 = 4;
+const WALL_DEFENSE_RADIUS: i32 = 4;
+const WALL_DAMAGE_REDUCTION: f32 = 0.25;
+const HOUSE_HEAL_BONUS: f32 = 0.02;
 /// Above this hunger, an outsider will steal from foreign farmland to survive —
 /// which makes them a trespasser and triggers the owner's defense. Below it,
 /// a clan's crops feed only its own people (despotic exclusion).
@@ -211,8 +223,13 @@ pub struct World {
     pub rng: Rng,
     pub params: Params,
     pub diplomacy: DiplomacyLedger,
+    pub buildings: Vec<Building>,
+    pub building_cells: Vec<u32>,
+    pub settlements: Vec<ClanSettlement>,
+    pub community_settlement: bool,
     next_entity_id: u32,
     next_clan_id: i32,
+    next_building_id: u32,
     pellet_total: usize,
     pub deaths_starved: u64,
     pub deaths_combat: u64,
@@ -244,8 +261,13 @@ impl World {
             rng: Rng::new(seed),
             params: Params::default(),
             diplomacy: DiplomacyLedger::new(),
+            buildings: Vec::new(),
+            building_cells: vec![0; (size * size) as usize],
+            settlements: Vec::new(),
+            community_settlement: true,
             next_entity_id: 1,
             next_clan_id: 1,
+            next_building_id: 1,
             pellet_total: 0,
             deaths_starved: 0,
             deaths_combat: 0,
@@ -290,8 +312,12 @@ impl World {
         self.deaths_combat = 0;
         self.births = 0;
         self.diplomacy = DiplomacyLedger::new();
+        self.buildings.clear();
+        self.building_cells.fill(0);
+        self.settlements.clear();
         self.disaster_level = 0.0;
         self.next_clan_id = 1;
+        self.next_building_id = 1;
     }
 
     // --- terrain ---
@@ -466,7 +492,9 @@ impl World {
         }
         let pop = self.clan_roster_size(cidx);
         let ordinary_floor = pop * STOCKPILE_FOOD_PER_MEMBER;
-        let reserve_cap = pop * RESERVE_FOOD_PER_MEMBER;
+        let base_reserve_cap = pop * RESERVE_FOOD_PER_MEMBER;
+        let reserve_cap = self.reserve_capacity(cidx);
+        let reserve_before = self.clans[cidx].reserve_food;
         let ordinary_needed = (ordinary_floor - self.clans[cidx].food).max(0);
         let to_ordinary = amount.min(ordinary_needed);
         self.clans[cidx].food += to_ordinary;
@@ -477,6 +505,14 @@ impl World {
         self.clans[cidx].reserve_food += to_reserve;
         self.clans[cidx].stats.reserve_deposited += to_reserve as u32;
         self.clans[cidx].food += remaining - to_reserve;
+        if self.community_settlement {
+            let granary_storage = (self.clans[cidx].reserve_food - base_reserve_cap).max(0)
+                - (reserve_before - base_reserve_cap).max(0);
+            if granary_storage > 0 {
+                let state = self.ensure_settlement_index(self.clans[cidx].id);
+                self.settlements[state].stats.granary_food_stored += granary_storage as u32;
+            }
+        }
     }
 
     fn consume_pellet_at(&mut self, e: &mut Entity, carry: bool) -> bool {
@@ -1000,13 +1036,86 @@ impl World {
     /// the clan to expand or fight toward better land.
     fn clan_member_cap(&self, clan_idx: usize) -> usize {
         let cap = self.clans[clan_idx].fertile_capacity.max(0.5);
-        (cap * self.params.members_per_claim.max(1) as f32)
+        let land_cap = (cap * self.params.members_per_claim.max(1) as f32)
             .round()
-            .max(3.0) as usize
+            .max(3.0) as usize;
+        let houses = if self.community_settlement {
+            active_building_counts(&self.buildings, self.clans[clan_idx].id).houses as usize
+        } else {
+            0
+        };
+        land_cap + houses * HOUSE_MEMBER_CAPACITY
     }
 
     fn clan_can_add_member(&self, clan_idx: usize) -> bool {
         (self.clan_roster_size(clan_idx) as usize) < self.clan_member_cap(clan_idx)
+    }
+
+    fn settlement_index(&self, clan_id: i32) -> Option<usize> {
+        self.settlements
+            .binary_search_by_key(&clan_id, |state| state.clan_id)
+            .ok()
+    }
+
+    fn ensure_settlement_index(&mut self, clan_id: i32) -> usize {
+        match self
+            .settlements
+            .binary_search_by_key(&clan_id, |state| state.clan_id)
+        {
+            Ok(index) => index,
+            Err(index) => {
+                self.settlements.insert(
+                    index,
+                    ClanSettlement {
+                        clan_id,
+                        ..ClanSettlement::default()
+                    },
+                );
+                index
+            }
+        }
+    }
+
+    fn settlement_tech(&self, clan_id: i32) -> TechState {
+        self.settlement_index(clan_id)
+            .map_or(TechState::default(), |index| self.settlements[index].tech)
+    }
+
+    fn settlement_signals(&self, clan_idx: usize) -> (f32, f32) {
+        if !self.community_settlement {
+            return (0.0, 0.0);
+        }
+        let clan_id = self.clans[clan_idx].id;
+        let pop = self.clan_roster_size(clan_idx).max(1) as f32;
+        let development =
+            (development_score(&self.buildings, clan_id) as f32 / (pop * 2.0)).clamp(0.0, 1.0);
+        let technology = self.settlement_tech(clan_id).level as f32 / MAX_TECH_LEVEL.max(1) as f32;
+        (development, technology)
+    }
+
+    fn reserve_capacity(&self, clan_idx: usize) -> i32 {
+        let pop = self.clan_roster_size(clan_idx);
+        let granaries = if self.community_settlement {
+            active_building_counts(&self.buildings, self.clans[clan_idx].id).granaries as i32
+        } else {
+            0
+        };
+        pop * RESERVE_FOOD_PER_MEMBER + granaries * GRANARY_RESERVE_CAPACITY
+    }
+
+    /// A live treatment toggle must not keep food that exists only because of
+    /// granary capacity. Structural settlement state remains available if the
+    /// treatment is re-enabled, but excess protected food is removed immediately.
+    fn enforce_settlement_ablation_limits(&mut self) {
+        if self.community_settlement {
+            return;
+        }
+        let caps: Vec<i32> = (0..self.clans.len())
+            .map(|idx| self.clan_roster_size(idx) * RESERVE_FOOD_PER_MEMBER)
+            .collect();
+        for (clan, cap) in self.clans.iter_mut().zip(caps) {
+            clan.reserve_food = clan.reserve_food.min(cap);
+        }
     }
 
     // --- spatial queries (bounded) ---
@@ -1276,6 +1385,7 @@ impl World {
     // --- per-tick ---
     pub fn step(&mut self) {
         self.tick += 1;
+        self.enforce_settlement_ablation_limits();
         // Farms (owned land) get first call on the food budget; wild trees fill
         // what's left — so cultivated territory out-produces the wilderness.
         self.grow_farms();
@@ -1284,6 +1394,7 @@ impl World {
         self.maybe_disaster();
         self.refresh_diplomacy();
         self.clan_think();
+        self.plan_settlement_projects();
         self.prepare_rescues();
 
         let mut entities = std::mem::take(&mut self.entities);
@@ -1941,6 +2052,7 @@ impl World {
                 let world_food = (self.pellet_total as f32 / max_pellets).min(1.0);
                 let (road_access, available_wood) = self.logistics_signals(idx);
                 let (trade_relation, trade_partners, trade_volume) = self.trade_signals(idx);
+                let (settlement_development, technology) = self.settlement_signals(idx);
 
                 // The situation vector the master + sub-minds read. Normalised,
                 // information-rich, and free of behavioural prescriptions — what
@@ -1964,26 +2076,26 @@ impl World {
                     (self.season_factor() - 1.0) / self.params.season_amp.max(0.01), // 15 season phase [-1,1]
                     // --- RESERVED future-feature inputs (read 0.0 until the world
                     //     wires them up; the brain's size never changes) ---
-                    road_access, // 16 roads / logistics access near home
-                    0.0,         // 17 buildings / settlement development level
-                    0.0,         // 18 tech / research level
-                    0.0,         // 19 military strength / equipment level
+                    road_access,            // 16 roads / logistics access near home
+                    settlement_development, // 17 buildings / settlement development level
+                    technology,             // 18 tech / research level
+                    0.0,                    // 19 military strength / equipment level
                     if self.params.community_logistics {
                         (self.clans[idx].wood as f32 / (size * 3.0).max(1.0)).min(1.0)
                     } else {
                         0.0
                     }, // 20 stored wood / head
-                    available_wood, // 21 reachable forest wood
-                    trade_relation, // 22 relation with nearest trade partner
-                    trade_partners, // 23 allies / active trade partners
-                    trade_volume, // 24 recent delivered trade volume
-                    0.0,         // 25 day/night phase (distinct from season)
+                    available_wood,         // 21 reachable forest wood
+                    trade_relation,         // 22 relation with nearest trade partner
+                    trade_partners,         // 23 allies / active trade partners
+                    trade_volume,           // 24 recent delivered trade volume
+                    0.0,                    // 25 day/night phase (distinct from season)
                     self.clans[idx].soil_depletion.min(1.0), // 26 soil depletion of owned tiles
-                    self.disaster_level, // 27 active disaster/event severity
-                    avg_health,  // 28 average member health
-                    0.0,         // 29 water / coast / river access of territory
-                    0.0,         // 30 spare
-                    1.0,         // 31 bias
+                    self.disaster_level,    // 27 active disaster/event severity
+                    avg_health,             // 28 average member health
+                    0.0,                    // 29 water / coast / river access of territory
+                    0.0,                    // 30 spare
+                    1.0,                    // 31 bias
                 ];
 
                 // The master routes; the sub-minds propose. We take the blended
@@ -2293,6 +2405,10 @@ impl World {
             }
         };
 
+        if !hungry {
+            self.apply_shelter_healing(e, cidx);
+        }
+
         if hungry {
             if self.eat_from_stockpile(e, cidx) {
                 return;
@@ -2388,6 +2504,9 @@ impl World {
             }
             ClanMode::Defend => self.defend(e, cidx),
             ClanMode::Expand => {
+                if self.handle_construction(e, cidx) {
+                    return;
+                }
                 if let Some((tx, ty)) = self.clans[cidx].expand_target {
                     e.goal = Goal::Claiming;
                     self.move_toward(e, tx, ty, true);
@@ -2407,8 +2526,10 @@ impl World {
             }
             ClanMode::Scout => {
                 if e.is_leader {
-                    e.goal = Goal::Wander;
-                    self.random_walk(e, true);
+                    if !self.handle_research(e, cidx) {
+                        e.goal = Goal::Wander;
+                        self.random_walk(e, true);
+                    }
                 } else {
                     self.gather(e, cidx);
                 }
@@ -2473,6 +2594,12 @@ impl World {
             self.clans[clan_idx].stats.trade_deliveries += 1;
             self.clans[partner_idx].stats.trade_food_received += food as u32;
             self.clans[partner_idx].stats.trade_wood_received += wood as u32;
+            if self.community_settlement
+                && active_building_counts(&self.buildings, donor_id).markets > 0
+            {
+                let state = self.ensure_settlement_index(donor_id);
+                self.settlements[state].stats.market_material_delivered += (food + wood) as u32;
+            }
             self.diplomacy
                 .record_trade(donor_id, partner_id, food as u32, wood as u32, self.tick);
             self.diplomacy
@@ -2515,13 +2642,22 @@ impl World {
         let wood_surplus = (self.clans[clan_idx].wood - TRADE_WOOD_FLOOR).max(0);
         let food_gap = self.clans[clan_idx].food / pop - self.clans[partner_idx].food / partner_pop;
         let wood_gap = self.clans[clan_idx].wood - self.clans[partner_idx].wood;
+        let market_capacity = if self.community_settlement {
+            active_building_counts(&self.buildings, self.clans[clan_idx].id).markets as i32
+        } else {
+            0
+        };
         let food = if food_gap > 1 {
-            food_surplus.min(TRADE_FOOD_LOAD).min(food_gap)
+            food_surplus
+                .min(TRADE_FOOD_LOAD + market_capacity)
+                .min(food_gap)
         } else {
             0
         };
         let wood = if wood_gap > 1 {
-            wood_surplus.min(TRADE_WOOD_LOAD).min(wood_gap)
+            wood_surplus
+                .min(TRADE_WOOD_LOAD + market_capacity)
+                .min(wood_gap)
         } else {
             0
         };
@@ -2547,6 +2683,32 @@ impl World {
         entity.trade_wood = 0;
     }
 
+    fn apply_shelter_healing(&mut self, entity: &mut Entity, clan_idx: usize) {
+        if !self.community_settlement || entity.health >= entity.max_health {
+            return;
+        }
+        let clan_id = self.clans[clan_idx].id;
+        let sheltered = self.buildings.iter().any(|building| {
+            building.clan_id == clan_id
+                && building.kind == BuildingKind::House
+                && building.is_active()
+                && (entity.x - building.x)
+                    .abs()
+                    .max((entity.y - building.y).abs())
+                    <= 6
+        });
+        if !sheltered {
+            return;
+        }
+        let before = entity.health;
+        entity.health = (entity.health + HOUSE_HEAL_BONUS).min(entity.max_health);
+        let healed = ((entity.health - before) * 1000.0).round().max(0.0) as u64;
+        if healed > 0 {
+            let state = self.ensure_settlement_index(clan_id);
+            self.settlements[state].stats.shelter_healing_milli += healed;
+        }
+    }
+
     fn should_gather_wood(&self, e: &Entity, cidx: usize) -> bool {
         if !self.params.community_logistics {
             return false;
@@ -2558,7 +2720,13 @@ impl World {
         let food_safe = self.clans[cidx].food >= pop * STOCKPILE_FOOD_PER_MEMBER;
         let reserve_ready = self.clans[cidx].reserve_food >= pop * RESERVE_FOOD_PER_MEMBER;
         let road_workers = self.clans[cidx].workforce[ClanMode::Expand.index()] as i32;
-        let wood_target = ROAD_WOOD_COST * (road_workers.max(1) + 2);
+        let road_target = ROAD_WOOD_COST * (road_workers.max(1) + 2);
+        let settlement_target = if self.community_settlement {
+            BuildingKind::Market.cost().wood + SETTLEMENT_WOOD_MARGIN
+        } else {
+            0
+        };
+        let wood_target = road_target.max(settlement_target);
         food_safe && reserve_ready && road_workers > 0 && self.clans[cidx].wood < wood_target
     }
 
@@ -3198,7 +3366,26 @@ impl World {
             if attacker_clan >= 0 && victim_clan >= 0 {
                 self.diplomacy.adjust(attacker_clan, victim_clan, -0.04);
             }
-            self.entities[j].health -= dmg;
+            let mut applied_damage = dmg;
+            if self.community_settlement && victim_clan >= 0 {
+                let protected = self.buildings.iter().any(|building| {
+                    building.clan_id == victim_clan
+                        && building.kind == BuildingKind::Wall
+                        && building.is_active()
+                        && (self.entities[j].x - building.x)
+                            .abs()
+                            .max((self.entities[j].y - building.y).abs())
+                            <= WALL_DEFENSE_RADIUS
+                });
+                if protected {
+                    let prevented = dmg * WALL_DAMAGE_REDUCTION;
+                    applied_damage -= prevented;
+                    let state = self.ensure_settlement_index(victim_clan);
+                    self.settlements[state].stats.wall_damage_prevented_milli +=
+                        (prevented * 1000.0).round() as u64;
+                }
+            }
+            self.entities[j].health -= applied_damage;
             if self.entities[j].health <= 0.0 {
                 if self.params.community_care && victim_clan >= 0 {
                     self.entities[j].health = 0.0;
@@ -3294,6 +3481,15 @@ impl World {
                 self.entities[mi].clan = -1;
             }
         }
+        for building in self
+            .buildings
+            .iter()
+            .filter(|building| building.clan_id == id)
+        {
+            self.building_cells[self.grid.idx(building.x, building.y)] = 0;
+        }
+        self.buildings.retain(|building| building.clan_id != id);
+        self.settlements.retain(|state| state.clan_id != id);
     }
 
     fn regrow_wood(&mut self) {
@@ -3311,6 +3507,197 @@ impl World {
                 self.grid.wood[i] += 1;
             }
         }
+    }
+
+    fn plan_settlement_projects(&mut self) {
+        if !self.community_settlement || self.tick % SETTLEMENT_PLAN_INTERVAL != 0 {
+            return;
+        }
+        let clan_ids: Vec<i32> = self
+            .clans
+            .iter()
+            .filter(|clan| !clan.disbanded)
+            .map(|clan| clan.id)
+            .collect();
+        for clan_id in clan_ids {
+            let Some(clan_idx) = self.clan_index(clan_id) else {
+                continue;
+            };
+            let state_idx = self.ensure_settlement_index(clan_id);
+            let existing = self.settlements[state_idx].build_target.and_then(|id| {
+                self.buildings
+                    .iter()
+                    .find(|building| building.id == id && !building.is_destroyed())
+            });
+            if existing.is_some_and(|building| !building.is_complete()) {
+                continue;
+            }
+            self.settlements[state_idx].build_target = None;
+
+            let pop = self.clan_roster_size(clan_idx);
+            let food_safe = self.clans[clan_idx].food >= pop * STOCKPILE_FOOD_PER_MEMBER;
+            let reserve_safe = self.clans[clan_idx].reserve_food >= pop * RESERVE_FOOD_PER_MEMBER;
+            let labor_ready = self.clans[clan_idx].workforce[ClanMode::Expand.index()] > 0;
+            let hunger_safe = !self.entities.iter().any(|entity| {
+                entity.clan == clan_id
+                    && entity.is_active()
+                    && entity.hunger(self.params.starve_ticks.max(1)) >= 0.85
+            });
+            if pop < 4 || !food_safe || !reserve_safe || !labor_ready || !hunger_safe {
+                continue;
+            }
+            let Some(kind) = self.next_building_kind(clan_idx) else {
+                continue;
+            };
+            let cost = kind.cost();
+            if self.clans[clan_idx].wood < cost.wood + SETTLEMENT_WOOD_MARGIN {
+                continue;
+            }
+            let Some((x, y)) = self.settlement_site(clan_idx) else {
+                continue;
+            };
+            self.clans[clan_idx].wood -= cost.wood;
+            let id = BuildingId(self.next_building_id);
+            self.next_building_id = self.next_building_id.saturating_add(1);
+            self.building_cells[self.grid.idx(x, y)] = id.0;
+            self.buildings.push(Building::new(id, clan_id, x, y, kind));
+            self.settlements[state_idx].build_target = Some(id);
+        }
+    }
+
+    fn next_building_kind(&self, clan_idx: usize) -> Option<BuildingKind> {
+        let clan = &self.clans[clan_idx];
+        let counts = building_counts(&self.buildings, clan.id);
+        let tech = self.settlement_tech(clan.id);
+        let candidate = if counts.granaries == 0 {
+            BuildingKind::Granary
+        } else if counts.workshops == 0 {
+            BuildingKind::Workshop
+        } else if counts.houses == 0 {
+            BuildingKind::House
+        } else if tech.level >= 1
+            && counts.walls < 2
+            && (clan.enemy_pos.is_some() || clan.trade_route_threat.is_some())
+        {
+            BuildingKind::Wall
+        } else if tech.level >= 2 && counts.markets == 0 && clan.stats.trade_deliveries > 0 {
+            BuildingKind::Market
+        } else if counts.houses < (self.clan_roster_size(clan_idx) / 8 + 1) as u16 {
+            BuildingKind::House
+        } else if counts.granaries < (self.clan_roster_size(clan_idx) / 12 + 1) as u16 {
+            BuildingKind::Granary
+        } else {
+            return None;
+        };
+        tech.can_build(candidate).then_some(candidate)
+    }
+
+    fn settlement_site(&self, clan_idx: usize) -> Option<(i32, i32)> {
+        let clan = &self.clans[clan_idx];
+        let home = clan.stockpile?;
+        let radius = self.params.home_range.clamp(2, 12);
+        let mut best = None;
+        for y in (home.1 - radius).max(0)..=(home.1 + radius).min(self.grid.size - 1) {
+            for x in (home.0 - radius).max(0)..=(home.0 + radius).min(self.grid.size - 1) {
+                let index = self.grid.idx(x, y);
+                if (x, y) == home
+                    || self.grid.owner[index] != clan.id
+                    || !self.is_passable(x, y)
+                    || self.building_cells[index] != 0
+                    || self.grid.road[index] != 0
+                    || self.grid.wood[index] != 0
+                    || self.grid.pellet[index] != 0
+                {
+                    continue;
+                }
+                let distance = (x - home.0).abs().max((y - home.1).abs());
+                let key = (distance, index);
+                if best.is_none_or(|(current, _, _)| key < current) {
+                    best = Some((key, x, y));
+                }
+            }
+        }
+        best.map(|(_, x, y)| (x, y))
+    }
+
+    fn handle_construction(&mut self, entity: &mut Entity, clan_idx: usize) -> bool {
+        if !self.community_settlement {
+            return false;
+        }
+        let clan_id = self.clans[clan_idx].id;
+        let Some(state_idx) = self.settlement_index(clan_id) else {
+            return false;
+        };
+        let Some(target_id) = self.settlements[state_idx].build_target else {
+            return false;
+        };
+        let Some(building_idx) = self
+            .buildings
+            .iter()
+            .position(|building| building.id == target_id)
+        else {
+            self.settlements[state_idx].build_target = None;
+            return false;
+        };
+        if self.buildings[building_idx].is_destroyed() || self.buildings[building_idx].is_complete()
+        {
+            self.settlements[state_idx].build_target = None;
+            return false;
+        }
+        let target = self.buildings[building_idx].position();
+        entity.goal = Goal::Constructing;
+        self.move_toward(entity, target.0, target.1, true);
+        if (entity.x - target.0).abs().max((entity.y - target.1).abs()) > 1 {
+            return true;
+        }
+        let work = 1 + u16::from(self.settlements[state_idx].tech.level >= 2);
+        let was_complete = self.buildings[building_idx].is_complete();
+        let added = self.buildings[building_idx].add_construction(work);
+        self.settlements[state_idx].stats.construction_work += added as u32;
+        if !was_complete && self.buildings[building_idx].is_complete() {
+            self.settlements[state_idx].stats.buildings_completed += 1;
+            self.settlements[state_idx].build_target = None;
+        }
+        true
+    }
+
+    fn handle_research(&mut self, entity: &mut Entity, clan_idx: usize) -> bool {
+        if !self.community_settlement {
+            return false;
+        }
+        let clan_id = self.clans[clan_idx].id;
+        let target = self
+            .buildings
+            .iter()
+            .filter(|building| {
+                building.clan_id == clan_id
+                    && building.kind == BuildingKind::Workshop
+                    && building.is_active()
+            })
+            .min_by_key(|building| {
+                (
+                    (entity.x - building.x)
+                        .abs()
+                        .max((entity.y - building.y).abs()),
+                    building.id,
+                )
+            })
+            .map(Building::position);
+        let Some(target) = target else {
+            return false;
+        };
+        entity.goal = Goal::Researching;
+        self.move_toward(entity, target.0, target.1, true);
+        if self.tick % RESEARCH_INTERVAL != 0
+            || (entity.x - target.0).abs().max((entity.y - target.1).abs()) > 1
+        {
+            return true;
+        }
+        let state_idx = self.ensure_settlement_index(clan_id);
+        self.settlements[state_idx].stats.research_ticks += 1;
+        let gained = self.settlements[state_idx].tech.add_research(1);
+        self.settlements[state_idx].stats.tech_levels_gained += gained as u32;
+        true
     }
 
     /// Expand workers turn stored wood into roads on the clan's busiest owned
@@ -3331,6 +3718,11 @@ impl World {
             if !clan.disbanded
                 && clan.wood >= ROAD_WOOD_COST
                 && clan.workforce[ClanMode::Expand.index()] > 0
+                && !self.buildings.iter().any(|building| {
+                    building.clan_id == clan.id
+                        && !building.is_destroyed()
+                        && !building.is_complete()
+                })
                 && self.entities.iter().any(|entity| {
                     entity.clan == clan.id
                         && entity.is_active()
@@ -3905,6 +4297,151 @@ mod tests {
         assert!(w.grid.road.iter().all(|&v| v == 0));
         assert!(w.grid.wood.iter().all(|&v| v == 0));
         assert!(w.grid.traffic.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn settlement_project_requires_food_reserve_wood_and_physical_expand_work() {
+        let mut world = settlement_test_world();
+        let clan_id = world.clans[0].id;
+        let pop = world.clan_roster_size(0);
+        world.clans[0].food = pop * STOCKPILE_FOOD_PER_MEMBER;
+        world.clans[0].reserve_food = pop * RESERVE_FOOD_PER_MEMBER - 1;
+        world.clans[0].wood = BuildingKind::Granary.cost().wood + SETTLEMENT_WOOD_MARGIN;
+        world.tick = SETTLEMENT_PLAN_INTERVAL;
+        world.plan_settlement_projects();
+        assert!(
+            world.buildings.is_empty(),
+            "unsafe settlement work must not start"
+        );
+
+        world.clans[0].reserve_food = pop * RESERVE_FOOD_PER_MEMBER;
+        world.plan_settlement_projects();
+        assert_eq!(world.buildings.len(), 1);
+        assert_eq!(world.buildings[0].kind, BuildingKind::Granary);
+        assert_eq!(
+            world.clans[0].wood, SETTLEMENT_WOOD_MARGIN,
+            "wood is reserved exactly once when the site opens"
+        );
+        let builder = world
+            .entities
+            .iter()
+            .position(|entity| entity.clan == clan_id && !entity.is_leader)
+            .unwrap();
+        let target = world.buildings[0].position();
+        let mut entities = std::mem::take(&mut world.entities);
+        world.rebuild_occupancy(&entities);
+        let mut worker = entities.remove(builder);
+        world.entities = entities;
+        worker.work_role = ClanMode::Expand;
+        worker.x = target.0;
+        worker.y = (target.1 + 1).min(world.grid.size - 1);
+        for _ in 0..BuildingKind::Granary.cost().work {
+            assert!(world.handle_construction(&mut worker, 0));
+        }
+        assert!(world.buildings[0].is_complete());
+        assert_eq!(world.settlements[0].stats.buildings_completed, 1);
+    }
+
+    #[test]
+    fn workshop_allows_physical_scout_research_from_tech_zero() {
+        let mut world = settlement_test_world();
+        let clan_id = world.clans[0].id;
+        let home = world.clans[0].stockpile.unwrap();
+        let mut workshop = Building::new(
+            BuildingId(world.next_building_id),
+            clan_id,
+            home.0 + 1,
+            home.1,
+            BuildingKind::Workshop,
+        );
+        world.next_building_id += 1;
+        workshop.add_construction(BuildingKind::Workshop.cost().work);
+        world.building_cells[world.grid.idx(workshop.x, workshop.y)] = workshop.id.0;
+        world.buildings.push(workshop);
+        let leader = world.entity_index(world.clans[0].leader_id).unwrap();
+        let mut entities = std::mem::take(&mut world.entities);
+        world.rebuild_occupancy(&entities);
+        let mut researcher = entities.remove(leader);
+        world.entities = entities;
+        researcher.x = home.0;
+        researcher.y = home.1;
+        researcher.work_role = ClanMode::Scout;
+
+        for _ in 0..40 {
+            world.tick += RESEARCH_INTERVAL;
+            assert!(world.handle_research(&mut researcher, 0));
+        }
+
+        assert_eq!(world.settlement_tech(clan_id).level, 1);
+        assert_eq!(world.settlements[0].stats.research_ticks, 40);
+    }
+
+    #[test]
+    fn settlement_ablation_zeros_signals_and_disables_additive_capacity() {
+        let mut world = settlement_test_world();
+        let clan_id = world.clans[0].id;
+        let home = world.clans[0].stockpile.unwrap();
+        for (offset, kind) in [(1, BuildingKind::House), (2, BuildingKind::Granary)] {
+            let mut building = Building::new(
+                BuildingId(world.next_building_id),
+                clan_id,
+                home.0 + offset,
+                home.1,
+                kind,
+            );
+            world.next_building_id += 1;
+            building.add_construction(kind.cost().work);
+            world.building_cells[world.grid.idx(building.x, building.y)] = building.id.0;
+            world.buildings.push(building);
+        }
+        let base_cap = {
+            world.community_settlement = false;
+            world.clan_member_cap(0)
+        };
+        world.community_settlement = true;
+        assert_eq!(world.clan_member_cap(0), base_cap + HOUSE_MEMBER_CAPACITY);
+        assert_eq!(
+            world.reserve_capacity(0),
+            world.clan_roster_size(0) * RESERVE_FOOD_PER_MEMBER + GRANARY_RESERVE_CAPACITY
+        );
+        assert!(world.settlement_signals(0).0 > 0.0);
+        let state_idx = world.ensure_settlement_index(clan_id);
+        world.settlements[state_idx].tech.level = 2;
+        let base_reserve = world.clan_roster_size(0) * RESERVE_FOOD_PER_MEMBER;
+        world.clans[0].reserve_food = base_reserve + GRANARY_RESERVE_CAPACITY;
+        world.community_settlement = false;
+        world.enforce_settlement_ablation_limits();
+        assert_eq!(world.settlement_signals(0), (0.0, 0.0));
+        assert_eq!(world.clan_member_cap(0), base_cap);
+        assert_eq!(world.clans[0].reserve_food, base_reserve);
+        let quality = crate::quality::score_clan(&world, clan_id);
+        assert_eq!(quality.infrastructure, 0.0);
+        assert_eq!(quality.technology, 0.0);
+    }
+
+    fn settlement_test_world() -> World {
+        let mut world = World::new(40, 0x5E77_1E);
+        world.populate(0, 0, 1);
+        let clan_id = world.clans[0].id;
+        let home = world.clans[0].stockpile.unwrap();
+        let direction = if home.0 + 3 < world.grid.size { 1 } else { -1 };
+        for dx in 1..=3 {
+            let x = home.0 + direction * dx;
+            let index = world.grid.idx(x, home.1);
+            world.grid.owner[index] = clan_id;
+            world.grid.terrain[index] = terrain::PLAINS;
+            world.grid.pellet[index] = 0;
+            world.grid.wood[index] = 0;
+            world.grid.road[index] = 0;
+        }
+        world.clans[0].workforce[ClanMode::Expand.index()] = 1;
+        let worker = world
+            .entities
+            .iter_mut()
+            .find(|entity| entity.clan == clan_id && !entity.is_leader)
+            .unwrap();
+        worker.work_role = ClanMode::Expand;
+        world
     }
 
     #[test]

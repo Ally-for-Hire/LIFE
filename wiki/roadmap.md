@@ -57,10 +57,17 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
 - **Full-world save/load V1** — versioned/checksummed atomic snapshots, exact RNG
   continuation, state/reference validation, UI controls, and trainer-sync isolation.
 
+## Buildings and technology V1
+
+Food-secure clans now spend harvested wood on physical one-cell construction
+sites. Expand workers complete houses, granaries, workshops, markets, and walls;
+Scout leaders perform research at workshops. The settlement ablation and
+promotion gate require construction, causal public-good value, survival, food
+security, and clan fairness. `LIFEWRLD` V2 persists the complete settlement state
+and explicitly migrates V1 worlds.
+
 ## Next (civ layers)
 
-- **Buildings + tech tree** — houses, granaries, walls, barracks, markets with
-  footprints, HP, and production; reuse fixed policy roles/inputs so `LFB1` remains valid.
 - **Weapons / military** — equipment from resources + tech that boosts
   attack/defense; brains learn to arm before war.
 

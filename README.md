@@ -75,6 +75,10 @@ cargo run --release        # first release build takes a few minutes, then it's 
 - **Full-world save/load:** the Controls panel writes `world.lifeworld` through a
   versioned, checksummed, atomic format and restores exact RNG, brains, economy,
   care, courier, and diplomacy state for byte-identical continuation.
+- **Buildings/Technology V1:** food-secure clans reserve harvested wood for
+  one-cell physical construction sites. Expand workers build houses, granaries,
+  workshops, markets, and walls; Scout leaders research at completed workshops,
+  unlocking stronger civic options without changing the fixed `LFB1` brain shape.
 - **Combat**, **food-gated reproduction**, **food memory**, and **one NPC per
   tile**.
 - Game-like **toggleable panels**, an **NPC inspector** (its current "idea"),
@@ -88,7 +92,8 @@ cargo run --release        # first release build takes a few minutes, then it's 
 - **Viewport:** drag to pan, scroll to zoom, click an NPC to inspect it.
 - **Controls panel:** save/load a complete world, presets, populate counts, and every tunable world
   parameter (food/trees, hunger/health, movement/perception, clans/combat,
-  growth/expansion, Community Logistics/Care/Trade ablations, terrain).
+  growth/expansion, Community Logistics/Care/Trade and Buildings/Technology
+  ablations, terrain).
 - **Training window:** start/stop evolution, edit the training config, watch the
   fitness graph, and seed the best brain into the live world.
 
@@ -103,6 +108,7 @@ cargo test --release tracked_champion_logistics_preserves_survival_gates -- --no
 cargo test --release champion_promotion -- --nocapture
 cargo test --release tracked_champion_care_preserves_survival_gates -- --nocapture
 cargo test --release tracked_champion_trade_preserves_survival_gates -- --nocapture
+cargo test --release tracked_champion_settlement_preserves_survival_gates -- --nocapture
 cargo test --release world::persistence::tests -- --nocapture
 ```
 
@@ -125,6 +131,14 @@ food security **0.932 / 0.936** (enabled/disabled), and enabled fairness **+0.01
 The treatment delivers **6.3 food + 3.8 wood** across **5.8 physical trips** per
 world while the disabled control delivers none; positive delivery is a hard gate.
 
+Buildings/Technology's 13-world paired result preserves **1.000** robust clan
+survival and food security **0.930 / 0.926** (enabled/disabled), with enabled
+fairness **+0.002**. Clans perform **60.9 physical construction work**, complete
+**1.85 buildings**, and produce **+7.38 causal public-good value** per world.
+Natural tracked runs did not assign Scout leaders to workshop research, so the
+deterministic physical-workshop unit test proves research progression separately;
+the release benchmark does not claim unobserved natural technology gain.
+
 Current tracked-champion result across 13 paired worlds: initial-clan survival
 **1.000 / 1.000** (enabled/disabled), food security **0.935 / 0.910**, hauling
 throughput **0.663 / 0.563**, road utility **0.253 / 0**, and enabled fairness
@@ -133,7 +147,9 @@ currently improves rather than spends that margin.
 
 `life-rs/champion.bin` is the tracked deployable model. Marathon logs, stage/gen
 snapshots, backup champions, and `target/` are generated locally and git-ignored.
-`world.lifeworld` is the separate full simulation snapshot; loading pauses the
+`world.lifeworld` is the separate full simulation snapshot. V2 adds settlement
+sites, technology, counters, and ablation state while explicitly migrating V1
+files to an empty enabled settlement layer. Loading pauses the
 world and detaches trainer-champion auto-sync until the user re-enables it.
 
 ## Documentation

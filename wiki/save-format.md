@@ -121,6 +121,16 @@ maximum courier loads of two food/one wood. Inputs 22–24 now
 carry relation, partner count, and recent delivered volume; existing brain files
 remain dimension-compatible.
 
+Buildings/Technology uses a World-level `community_settlement` switch rather than
+`Params`, because toggling it is a live causal treatment over retained state.
+Project planning runs every 120 ticks only with at least four members, ordinary
+food of four/member, full reserve of four/member, hunger below 0.85, no active
+site, and enough wood for the cost plus a four-wood margin. Building costs are:
+House 12 wood/24 work, Granary 18/36, Workshop 24/48, Market 30/60, and Wall
+10/20. Research runs every 30 ticks at a physical workshop and costs 40/90/160
+for levels 1/2/3. Inputs 17–18 carry normalized development and technology; the
+fixed brain and champion formats do not change.
+
 ## Terrain (applies on Populate)
 
 | Parameter | Default | Meaning |
@@ -150,7 +160,7 @@ Champion brains remain independently serialized as `life-rs/champion.bin` in the
 `LFB1` format. Stage/generation snapshots and marathon logs are generated artifacts.
 
 The Controls panel saves the complete live simulation to `world.lifeworld`. The
-`LIFEWRLD` V1 envelope contains an explicit version, fixed payload length, CRC32,
+`LIFEWRLD` envelope contains an explicit version, fixed payload length, CRC32,
 and a fixed-integer little-endian payload capped at 512 MiB. Saving validates the
 live state, writes a temporary file, flushes it, and atomically replaces the target
 (with write-through replacement on Windows).
@@ -163,3 +173,13 @@ tick rebuilds them. Loading validates checksums, sizes, floats, coordinates, IDs
 rosters, references, brain dimensions, RNG, and diplomacy before returning a new
 world. The UI installs it transactionally, pauses it, clears stale view/history
 state, and disables trainer-champion auto-sync until explicitly re-enabled.
+
+V2 keeps the frozen V1 base DTO and adds buildings, the one-cell building lookup
+layer, sorted clan settlement/technology state, causal counters, the live ablation,
+and the next stable building id. Loading a V1 file explicitly initializes an empty
+enabled settlement layer; it never reinterprets V1 bytes as the newer layout.
+Validation rejects duplicate/missing building ids, inconsistent footprints,
+out-of-bounds sites, invalid construction/HP, bad tech/research values, unsorted
+settlement records, project references that are not live incomplete buildings
+owned by the same clan, and orphaned incomplete sites without exactly one active
+clan project.

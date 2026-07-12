@@ -358,10 +358,34 @@ trade continuation, scratch exclusion, corruption/version rejection, stale-cache
 parameter validation, and Windows overwrite behavior. The integrated release suite
 passes 60 tests with one ignored marathon.
 
+### A21 — Buildings & Technology V1
+
+Settlement progression now spends real harvested wood only after ordinary and
+reserve food buffers are full. Expand workers walk to one-cell sites and perform
+construction; Scout leaders walk to workshops and research a fixed three-level
+technology progression. Houses, granaries, workshops, markets, and walls provide
+population/healing, reserve, research, trade, and defense value while keeping the
+32-input/7-output `LFB1` contract intact through reserved inputs 17–18.
+
+The live settlement ablation disables planning, work, research, signals, and all
+effects without deleting state. Quality scores observed infrastructure and useful
+public-good counters only inside the survival gate. Marathon promotion requires
+completed physical construction, positive causal value, paired survival/security/
+fairness, and incumbent infrastructure non-regression. The tracked 13-world pair
+preserves 1.000 survival, records 0.930/0.926 enabled/disabled security and +0.002
+enabled fairness, and averages 60.9 work, 1.85 completed buildings, and +7.38 useful
+value. Natural Scout research was zero, so a deterministic physical-workshop test
+proves technology progression without claiming a natural benchmark gain.
+
+`LIFEWRLD` V2 adds exact settlement state and explicit V1 migration. Eleven
+persistence tests cover active construction/research, malformed settlement state,
+and previous deterministic-continuation guarantees. The integrated release suite
+passes 75 tests with one ignored marathon.
+
 ## Open ideas / next
 
-- **Buildings, technology, and equipment:** resource-backed settlement progression
-  that preserves the fixed champion brain contract.
+- **Resource-backed military equipment:** add extractable material, production,
+  equipment ownership, and survival-gated promotion without changing `LFB1`.
 - **More sub-minds / deeper hierarchy:** specialist nets for diplomacy, logistics;
   a meta-gate over gates.
 - **Live-world continuous evolution without violence:** cultural imitation so

@@ -14,6 +14,9 @@ The single source of truth and the per-tick simulation.
 | `trees: Vec<Tree>` | persistent food sources |
 | `clans: Vec<Clan>` | active clans |
 | `diplomacy: DiplomacyLedger` | sorted symmetric trust, pacts, and delivered-volume memory |
+| `buildings` / `building_cells` | physical settlement sites plus their one-cell footprint lookup |
+| `settlements` | sorted per-clan technology, active project, and causal public-good counters |
+| `community_settlement` | live Buildings/Technology treatment/ablation switch |
 | `params: Params` | all live-tunable settings |
 | `rng: Rng` | this world's deterministic PRNG |
 | `deaths_starved` / `deaths_combat` / `births` | population counters |
@@ -51,6 +54,8 @@ adds a bleed-out deadline, attacker credit, and persistent rescuer/patient carry
 links. Hunger, rescue, and immediate defense may override the assigned role without
 erasing it. Trade adds a persistent partner id, return-state flag, and dedicated
 food/wood cargo, so role changes cannot duplicate or abandon an in-flight delivery.
+`Constructing` and `Researching` are appended goals, preserving historical enum
+indices while exposing physical settlement work in the inspector.
 
 ## `Clan` + `ClanMode` (`clan.rs`)
 
@@ -75,6 +80,16 @@ symmetric and deterministic; each record keeps clamped trust, optional pact
 expiry, decaying delivered food/wood volume, and the last completed trade tick.
 Offers cannot create delivery evidence, and pruning removes disbanded clans.
 
+## Settlement types (`settlement.rs`)
+
+`Building` owns a stable `BuildingId`, clan, cell, `BuildingKind`, construction
+progress, and HP. `BuildingKind` fixes wood/work cost, unlock level, HP, and
+development value for House, Granary, Workshop, Market, and Wall.
+`ClanSettlement` owns `TechState`, the optional active build target, and
+`SettlementStats`. The pure module clamps construction/damage/repair and carries
+research overflow across the fixed three-level progression; `World` owns all
+placement, resource spending, worker movement, scheduling, and effects.
+
 ## `Brain` (`brain.rs`)
 
 A **hierarchical mixture-of-experts** leader policy. A master *gate* network
@@ -92,8 +107,12 @@ is delegating to). This is the substrate for "master control AIs with sub-minds.
 Owns the population and evolution. `evaluate_parallel(pop, cfg, gen)` fans
 independent arenas across all cores (rayon) and returns mean fitness per brain;
 `finish_generation` records best/avg history and breeds the next generation
-(elitism + tournament selection + crossover + mutation). `best_brain` is the
-hall-of-fame champion.
+(elitism + tournament selection + crossover + mutation). Infrastructure and
+technology enter quality only behind the survival gate. The paired settlement
+benchmark measures physical work, completed buildings, and causal public-good
+value; marathon promotion rejects survival/security/fairness regressions, hollow
+construction, or incumbent infrastructure loss. `best_brain` is the hall-of-fame
+champion.
 
 ## `Grid` (`grid.rs`)
 

@@ -8,6 +8,7 @@
 //! panels, a click-to-inspect NPC "idea" readout, and live progress graphs.
 
 use crate::entity::Goal;
+use crate::settlement::{active_building_counts, BuildingKind};
 use crate::trainer::{arena_count, TrainCfg, Trainer};
 use crate::world::{Params, World};
 use eframe::egui;
@@ -391,6 +392,27 @@ impl LifeApp {
                 px[g.idx(t.x, t.y)] = egui::Color32::from_rgb(54, 150, 80);
             }
         }
+        // Settlement buildings. Construction sites are deliberately dimmer so
+        // physical progress is visible without obscuring villagers working on them.
+        for building in &self.world.buildings {
+            if building.is_destroyed() || !g.in_bounds(building.x, building.y) {
+                continue;
+            }
+            let color = match building.kind {
+                BuildingKind::House => egui::Color32::from_rgb(104, 164, 224),
+                BuildingKind::Granary => egui::Color32::from_rgb(222, 174, 72),
+                BuildingKind::Workshop => egui::Color32::from_rgb(166, 112, 204),
+                BuildingKind::Market => egui::Color32::from_rgb(64, 188, 174),
+                BuildingKind::Wall => egui::Color32::from_rgb(164, 170, 180),
+            };
+            let alpha = if building.is_complete() {
+                1.0
+            } else {
+                0.25 + building.completion_fraction() * 0.55
+            };
+            let idx = g.idx(building.x, building.y);
+            px[idx] = blend(px[idx], color, alpha);
+        }
         // stockpiles
         for c in &self.world.clans {
             if c.disbanded {
@@ -658,6 +680,23 @@ impl eframe::App for LifeApp {
                         }
 
                         params_ui(ui, &mut self.world.params, self.tps);
+                        egui::CollapsingHeader::new("Buildings and technology")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                ui.checkbox(
+                                    &mut self.world.community_settlement,
+                                    "enable Buildings/Technology V1",
+                                );
+                                ui.label(
+                                    egui::RichText::new(if self.world.community_settlement {
+                                        "food-secure clans spend harvested wood on physical construction; Scout leaders research at workshops"
+                                    } else {
+                                        "causal ablation: construction, research, and all building effects are disabled"
+                                    })
+                                    .small()
+                                    .weak(),
+                                );
+                            });
 
                         ui.separator();
                         ui.label(egui::RichText::new("VIEW").small().weak());
@@ -702,6 +741,11 @@ impl eframe::App for LifeApp {
                                 "road (benefit disabled)"
                             },
                         );
+                        legend_row(ui, egui::Color32::from_rgb(104, 164, 224), "house");
+                        legend_row(ui, egui::Color32::from_rgb(222, 174, 72), "granary");
+                        legend_row(ui, egui::Color32::from_rgb(166, 112, 204), "workshop");
+                        legend_row(ui, egui::Color32::from_rgb(64, 188, 174), "market");
+                        legend_row(ui, egui::Color32::from_rgb(164, 170, 180), "wall");
                     });
                 });
         }
@@ -801,6 +845,48 @@ impl eframe::App for LifeApp {
                                 } else {
                                     "trade and diplomacy: disabled (ablation)"
                                 });
+                                ui.label(if self.world.community_settlement {
+                                    "buildings and technology: enabled"
+                                } else {
+                                    "buildings and technology: disabled (ablation)"
+                                });
+                                let counts = active_building_counts(&self.world.buildings, c.id);
+                                let settlement = self
+                                    .world
+                                    .settlements
+                                    .iter()
+                                    .find(|state| state.clan_id == c.id);
+                                let tech = settlement.map_or(0, |state| state.tech.level);
+                                let research = settlement.map_or(0, |state| state.tech.research);
+                                ui.label(format!(
+                                    "buildings: {} house / {} granary / {} workshop / {} market / {} wall",
+                                    counts.houses,
+                                    counts.granaries,
+                                    counts.workshops,
+                                    counts.markets,
+                                    counts.walls
+                                ));
+                                ui.label(format!("technology: level {tech} · {research} research"));
+                                if let Some(state) = settlement {
+                                    if let Some(target) = state.build_target.and_then(|id| {
+                                        self.world
+                                            .buildings
+                                            .iter()
+                                            .find(|building| building.id == id)
+                                    }) {
+                                        ui.label(format!(
+                                            "project: {} · {:.0}% complete",
+                                            target.kind.label(),
+                                            target.completion_fraction() * 100.0
+                                        ));
+                                    }
+                                    ui.label(format!(
+                                        "development: {} completed · {} work · {} research ticks",
+                                        state.stats.buildings_completed,
+                                        state.stats.construction_work,
+                                        state.stats.research_ticks
+                                    ));
+                                }
                                 if let Some(partner) = c.trade_partner {
                                     let trust = self
                                         .world
@@ -1124,6 +1210,12 @@ impl eframe::App for LifeApp {
                             ui.end_row();
                             ui.label("delivered trade");
                             ui.label(format!("{:.0}%", t.mean_trade * 100.0));
+                            ui.end_row();
+                            ui.label("settlement infrastructure");
+                            ui.label(format!("{:.0}%", t.mean_infrastructure * 100.0));
+                            ui.end_row();
+                            ui.label("technology");
+                            ui.label(format!("{:.0}%", t.mean_technology * 100.0));
                             ui.end_row();
                             ui.label("clan fairness floor");
                             ui.label(format!("{:+.0}%", t.fairness_margin * 100.0));

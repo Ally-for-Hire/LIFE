@@ -49,6 +49,9 @@ world) finds the strategies. See [prior-art.md](prior-art.md) and
   builds symmetric trust, and temporary partners gain non-aggression and passage.
 - **World persistence:** `world.lifeworld` is versioned, checksummed, validated,
   atomically replaced, and resumes the exact saved deterministic trajectory.
+- **Buildings and technology:** food-secure clans construct physical settlement
+  sites with Expand workers; Scout leaders research at workshops, and completed
+  buildings provide measured public goods behind a live causal ablation.
 - **Death only from scarcity or combat:** NPCs remember food and home to it, so
   they never wander off and starve for no reason.
 - **Build/run:** `cd life-rs && cargo run --release`.
