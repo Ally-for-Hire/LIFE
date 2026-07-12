@@ -13,6 +13,7 @@ mod diag;
 mod diplomacy;
 mod entity;
 mod grid;
+mod military;
 mod quality;
 mod rng;
 mod settlement;

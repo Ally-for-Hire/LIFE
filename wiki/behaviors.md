@@ -192,6 +192,38 @@ work, 1.85 completed buildings, and +7.38 causal public-good value. It observed 
 natural Scout research, so a focused deterministic physical-workshop test proves
 research progression without inflating the natural benchmark claim.
 
+## Resource-backed Military Equipment V1
+
+Mineral deposits are deterministic, finite, non-blocking world objects. Each new
+settlement receives a reachable bootstrap deposit without consuming RNG, so an
+empty pipeline cannot be blamed on unlucky geography. Once a completed Workshop
+exists, one stable non-leader Gather worker may mine and carry at most eight ore.
+Extraction and production require at least four members, ordinary food of four per
+member, a full four-per-member emergency reserve, and a personally non-hungry
+worker. Food, wood, trade, rescue, and construction priorities remain ahead of
+military work. If clan buffers fall after partial extraction, the carrier stops
+mining and returns its ore home; personal hunger still overrides that return.
+
+Ore changes ownership only when the miner physically returns to the stockpile.
+After construction obligations are clear, a stable Expand worker reserves safe
+ore/wood, walks adjacent to the Workshop, performs every production tick, and
+personally receives the completed item—there is no remote equipping.
+
+- **Spear:** technology 0, 2 ore + 4 wood + 16 work, +25% outgoing base damage.
+- **Sword:** technology 1, 5 ore + 2 wood + 24 work, +45% outgoing base damage.
+- **Armor:** technology 2, 8 ore + 2 wood + 36 work, -25% incoming damage.
+
+Input 19 reports equipped bonus/protection per active member; input 30 reports
+stored plus reachable ore. Inputs 25 and 29 retain their day/night and water/coast
+reservations. The live ablation zeros both military inputs and disables the full
+pipeline, scoring, and combat effects while retaining referentially valid state.
+
+The tracked 13-world pair preserves 1.000 clan survival, reports 0.931/0.935 food
+security and +0.002 enabled fairness, and averages 15.4 delivered ore, 2.9 items,
+and about 4,070 equipped-member ticks. The same-clan full pipeline completes in
+38% of worlds; focused tests prove exact weapon/armor math without requiring
+natural violence as a release condition.
+
 If a leader dies a follower is promoted; a clan disbands only when no members
 remain (its territory is then freed). To keep the world a living patchwork,
 `maintain_clans` re-forms villages from masterless **refugees** when war thins the

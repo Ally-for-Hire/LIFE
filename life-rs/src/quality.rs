@@ -81,6 +81,8 @@ pub struct QualityScore {
     pub infrastructure: f32,
     /// Normalized settlement technology level.
     pub technology: f32,
+    /// Physically owned equipment readiness plus observed combat value.
+    pub military: f32,
     pub defense: f32,
     pub combat: f32,
     pub routing_entropy: f32,
@@ -109,6 +111,7 @@ impl Default for QualityScore {
             trade: 0.0,
             infrastructure: 0.0,
             technology: 0.0,
+            military: 0.0,
             defense: 0.0,
             combat: 0.0,
             routing_entropy: 0.0,
@@ -133,8 +136,14 @@ impl QualityScore {
                 + self.trade * 0.15
                 + self.survival * 0.03
                 + self.security * 0.02,
-            self.defense * 0.55 + self.settlement * 0.20 + self.survival * 0.25,
-            self.combat * 0.60 + self.expansion * 0.15 + self.survival * 0.25,
+            self.defense * 0.45
+                + self.military * 0.10
+                + self.settlement * 0.20
+                + self.survival * 0.25,
+            self.combat * 0.50
+                + self.military * 0.10
+                + self.expansion * 0.15
+                + self.survival * 0.25,
         ]
     }
 
@@ -274,6 +283,35 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
     let infrastructure = (development_value * 0.4 + useful_value * 0.6).clamp(0.0, 1.0);
     let technology =
         settlement_state.tech.level as f32 / crate::settlement::MAX_TECH_LEVEL.max(1) as f32;
+    let military_state = if w.community_military {
+        w.militaries
+            .iter()
+            .find(|state| state.clan_id == cid)
+            .copied()
+            .unwrap_or_default()
+    } else {
+        crate::military::ClanMilitary::default()
+    };
+    let equipped = if w.community_military {
+        w.equipment
+            .iter()
+            .filter(|loadout| {
+                (loadout.weapon.is_some() || loadout.armor.is_some())
+                    && w.entity_by_id(loadout.entity_id)
+                        .is_some_and(|entity| entity.clan == cid && entity.is_active())
+            })
+            .count() as f32
+    } else {
+        0.0
+    };
+    let readiness = (equipped / pop.max(1.0)).clamp(0.0, 1.0);
+    let causal_combat_milli = military_state
+        .stats
+        .bonus_damage_milli
+        .saturating_add(military_state.stats.damage_prevented_milli)
+        as f32;
+    let causal_use = saturating_rate(causal_combat_milli / member_ticks, 25.0);
+    let military = (readiness * 0.8 + causal_use * 0.2).clamp(0.0, 1.0);
 
     let role_total = c.stats.role_tick_sum.iter().sum::<u64>() as f32;
     let task_coverage = if role_total > 0.0 {
@@ -362,6 +400,7 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
         trade,
         infrastructure,
         technology,
+        military,
         defense,
         combat,
         routing_entropy: 0.0,
@@ -453,7 +492,7 @@ mod tests {
 /// gate collapses per decision; coverage measures how many experts receive a
 /// meaningful average share across different situations.
 pub fn routing_metrics(brain: &Brain) -> (f32, f32) {
-    let mut probes = [[0.0f32; N_IN]; 13];
+    let mut probes = [[0.0f32; N_IN]; 16];
     for probe in &mut probes {
         probe[0] = 0.30;
         probe[1] = 0.50;
@@ -492,6 +531,14 @@ pub fn routing_metrics(brain: &Brain) -> (f32, f32) {
     probes[12][18] = 0.90; // technologically mature settlement under pressure
     probes[12][6] = 0.55;
     probes[12][8] = 0.45;
+    probes[13][17] = 0.60; // food-secure workshop with ore opportunity
+    probes[13][30] = 0.90;
+    probes[14][6] = 0.80; // under-armed defense pressure
+    probes[14][13] = 1.0;
+    probes[14][19] = 0.05;
+    probes[15][6] = 0.80; // armed defense pressure
+    probes[15][13] = 1.0;
+    probes[15][19] = 0.90;
 
     let mut entropy_sum = 0.0;
     let mut mean_gate = [0.0f32; N_EXPERTS];

@@ -8,6 +8,7 @@
 //! panels, a click-to-inspect NPC "idea" readout, and live progress graphs.
 
 use crate::entity::Goal;
+use crate::military::{equipment_for, ore_cargo_for};
 use crate::settlement::{active_building_counts, BuildingKind};
 use crate::trainer::{arena_count, TrainCfg, Trainer};
 use crate::world::{Params, World};
@@ -381,6 +382,16 @@ impl LifeApp {
             }
         }
         // pellets
+        for deposit in &self.world.ore_deposits {
+            if !deposit.is_depleted() && g.in_bounds(deposit.x, deposit.y) {
+                px[g.idx(deposit.x, deposit.y)] = blend(
+                    px[g.idx(deposit.x, deposit.y)],
+                    egui::Color32::from_rgb(112, 142, 164),
+                    0.72,
+                );
+            }
+        }
+        // pellets
         for i in 0..n {
             if g.pellet[i] > 0 {
                 px[i] = egui::Color32::from_rgb(64, 168, 96);
@@ -445,6 +456,14 @@ impl LifeApp {
                     Goal::SeekFood => egui::Color32::from_rgb(200, 180, 120),
                     _ => egui::Color32::from_rgb(168, 174, 184),
                 }
+            };
+            let c = if self.world.community_military
+                && equipment_for(&self.world.equipment, e.id)
+                    .is_some_and(|gear| gear.weapon.is_some() || gear.armor.is_some())
+            {
+                blend(c, egui::Color32::from_rgb(224, 232, 240), 0.32)
+            } else {
+                c
             };
             px[g.idx(e.x, e.y)] = c;
         }
@@ -697,6 +716,23 @@ impl eframe::App for LifeApp {
                                     .weak(),
                                 );
                             });
+                        egui::CollapsingHeader::new("Military equipment")
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                ui.checkbox(
+                                    &mut self.world.community_military,
+                                    "enable Military Equipment V1",
+                                );
+                                ui.label(
+                                    egui::RichText::new(if self.world.community_military {
+                                        "food-secure Gather miners haul ore; Expand smiths physically forge and own equipment at workshops"
+                                    } else {
+                                        "causal ablation: deposits and state remain visible, but mining, forging, signals, scoring, and combat bonuses are inert"
+                                    })
+                                    .small()
+                                    .weak(),
+                                );
+                            });
 
                         ui.separator();
                         ui.label(egui::RichText::new("VIEW").small().weak());
@@ -746,6 +782,11 @@ impl eframe::App for LifeApp {
                         legend_row(ui, egui::Color32::from_rgb(166, 112, 204), "workshop");
                         legend_row(ui, egui::Color32::from_rgb(64, 188, 174), "market");
                         legend_row(ui, egui::Color32::from_rgb(164, 170, 180), "wall");
+                        legend_row(
+                            ui,
+                            egui::Color32::from_rgb(112, 142, 164),
+                            "mineral deposit",
+                        );
                     });
                 });
         }
@@ -799,6 +840,17 @@ impl eframe::App for LifeApp {
                             );
                             ui.label(format!("carried food: {}", e.food));
                             ui.label(format!("carried wood: {}", e.wood));
+                            ui.label(format!(
+                                "carried ore: {}",
+                                ore_cargo_for(&self.world.ore_cargo, e.id).map_or(0, |cargo| cargo.ore)
+                            ));
+                            if let Some(loadout) = equipment_for(&self.world.equipment, e.id) {
+                                ui.label(format!(
+                                    "equipment: {} / {}",
+                                    loadout.weapon.map_or("no weapon", |kind| kind.label()),
+                                    loadout.armor.map_or("no armor", |kind| kind.label())
+                                ));
+                            }
                             if e.trade_target_clan >= 0 {
                                 if e.trade_returning {
                                     ui.label(format!(
@@ -850,6 +902,47 @@ impl eframe::App for LifeApp {
                                 } else {
                                     "buildings and technology: disabled (ablation)"
                                 });
+                                ui.label(if self.world.community_military {
+                                    "military equipment: enabled"
+                                } else {
+                                    "military equipment: disabled (ablation)"
+                                });
+                                if let Some(military) = self
+                                    .world
+                                    .militaries
+                                    .iter()
+                                    .find(|state| state.clan_id == c.id)
+                                {
+                                    let armed = self
+                                        .world
+                                        .equipment
+                                        .iter()
+                                        .filter(|loadout| {
+                                            (loadout.weapon.is_some() || loadout.armor.is_some())
+                                                && self.world.entity_by_id(loadout.entity_id)
+                                                    .is_some_and(|entity| entity.clan == c.id)
+                                        })
+                                        .count();
+                                    ui.label(format!(
+                                        "armory: {} ore · {} equipped",
+                                        military.ore_stockpile, armed
+                                    ));
+                                    if let Some(project) = military.project {
+                                        ui.label(format!(
+                                            "forge: {} for NPC #{} · {:.0}%",
+                                            project.kind.label(),
+                                            project.recipient_entity_id,
+                                            project.completion_fraction() * 100.0
+                                        ));
+                                    }
+                                    ui.label(format!(
+                                        "military work: {} ore delivered · {} equipment · {:.2} bonus / {:.2} prevented",
+                                        military.stats.ore_delivered,
+                                        military.stats.equipment_completed,
+                                        military.stats.bonus_damage_milli as f32 / 1000.0,
+                                        military.stats.damage_prevented_milli as f32 / 1000.0
+                                    ));
+                                }
                                 let counts = active_building_counts(&self.world.buildings, c.id);
                                 let settlement = self
                                     .world
@@ -1216,6 +1309,9 @@ impl eframe::App for LifeApp {
                             ui.end_row();
                             ui.label("technology");
                             ui.label(format!("{:.0}%", t.mean_technology * 100.0));
+                            ui.end_row();
+                            ui.label("military readiness");
+                            ui.label(format!("{:.0}%", t.mean_military * 100.0));
                             ui.end_row();
                             ui.label("clan fairness floor");
                             ui.label(format!("{:+.0}%", t.fairness_margin * 100.0));

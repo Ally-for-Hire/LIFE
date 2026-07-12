@@ -17,6 +17,9 @@ The single source of truth and the per-tick simulation.
 | `buildings` / `building_cells` | physical settlement sites plus their one-cell footprint lookup |
 | `settlements` | sorted per-clan technology, active project, and causal public-good counters |
 | `community_settlement` | live Buildings/Technology treatment/ablation switch |
+| `ore_deposits` / `ore_cargo` | stable finite deposits and sorted physical entity cargo |
+| `militaries` / `equipment` | sorted clan production state and entity-owned weapon/armor loadouts |
+| `community_military` | live pipeline/scoring/combat treatment switch |
 | `params: Params` | all live-tunable settings |
 | `rng: Rng` | this world's deterministic PRNG |
 | `deaths_starved` / `deaths_combat` / `births` | population counters |
@@ -55,7 +58,8 @@ links. Hunger, rescue, and immediate defense may override the assigned role with
 erasing it. Trade adds a persistent partner id, return-state flag, and dedicated
 food/wood cargo, so role changes cannot duplicate or abandon an in-flight delivery.
 `Constructing` and `Researching` are appended goals, preserving historical enum
-indices while exposing physical settlement work in the inspector.
+indices while exposing physical settlement work in the inspector. `MiningOre`,
+`HaulingOre`, and `ForgingEquipment` are appended after them for the same reason.
 
 ## `Clan` + `ClanMode` (`clan.rs`)
 
@@ -113,6 +117,16 @@ benchmark measures physical work, completed buildings, and causal public-good
 value; marathon promotion rejects survival/security/fairness regressions, hollow
 construction, or incumbent infrastructure loss. `best_brain` is the hall-of-fame
 champion.
+
+## Military types (`military.rs`)
+
+`OreDeposit` owns a stable id, cell, and clamped finite remainder.
+`EntityOreCargo` and `EntityEquipment` live in entity-id-sorted World vectors so
+old serialized `Entity` layouts stay frozen. `EquipmentKind` fixes slot, ore/wood/
+work recipe, tech unlock, attack bonus, and protection for Spear, Sword, and Armor.
+`ClanMilitary` owns stored ore, the stable miner assignment, one physical
+`EquipmentProject`, and causal `MilitaryStats`; completion emits an item for the
+same adjacent worker who performed the forge work.
 
 ## `Grid` (`grid.rs`)
 

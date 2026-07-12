@@ -52,6 +52,9 @@ world) finds the strategies. See [prior-art.md](prior-art.md) and
 - **Buildings and technology:** food-secure clans construct physical settlement
   sites with Expand workers; Scout leaders research at workshops, and completed
   buildings provide measured public goods behind a live causal ablation.
+- **Military equipment:** one safe Gather miner hauls finite ore and an Expand
+  smith physically forges entity-owned equipment at a Workshop; paired promotion
+  proves the supply chain without rewarding violence over survival.
 - **Death only from scarcity or combat:** NPCs remember food and home to it, so
   they never wander off and starve for no reason.
 - **Build/run:** `cd life-rs && cargo run --release`.

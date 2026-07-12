@@ -70,6 +70,7 @@ pub struct AiBenchmarkReport {
     pub mean_trade: f32,
     pub mean_infrastructure: f32,
     pub mean_technology: f32,
+    pub mean_military: f32,
     pub routing_entropy: f32,
     pub expert_coverage: f32,
     pub eligible: bool,
@@ -201,6 +202,39 @@ pub struct SettlementBenchmarkReport {
     pub survival_non_regression: bool,
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct MilitaryBenchmarkArm {
+    pub robust_survival: f32,
+    pub mean_security: f32,
+    pub clan_cohort_survival: f32,
+    pub neutral_cohort_survival: f32,
+    pub fairness_delta: f32,
+    pub robust_fairness_delta: f32,
+    pub worst_fairness_delta: f32,
+    pub military: f32,
+    pub ore_delivered: f32,
+    pub production_work: f32,
+    pub equipment_completed: f32,
+    pub equipped_member_ticks: f32,
+    pub causal_combat_value: f32,
+    pub unsafe_work_ticks: f32,
+    pub pipeline_world_fraction: f32,
+    pub eligible: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct MilitaryBenchmarkReport {
+    pub worlds: usize,
+    pub enabled: MilitaryBenchmarkArm,
+    pub disabled: MilitaryBenchmarkArm,
+    pub clan_survival_delta: f32,
+    pub security_delta: f32,
+    pub fairness_delta: f32,
+    pub survival_non_regression: bool,
+}
+
 #[derive(Clone)]
 pub struct TrainCfg {
     pub pop_size: usize,
@@ -272,6 +306,7 @@ pub struct Trainer {
     pub mean_trade: f32,
     pub mean_infrastructure: f32,
     pub mean_technology: f32,
+    pub mean_military: f32,
     pub routing_balance: f32,
     pub history: Vec<[f64; 2]>,     // (generation, best fitness)
     pub avg_history: Vec<[f64; 2]>, // (generation, average fitness)
@@ -320,6 +355,7 @@ impl Trainer {
             mean_trade: 0.0,
             mean_infrastructure: 0.0,
             mean_technology: 0.0,
+            mean_military: 0.0,
             routing_balance: 0.0,
             history: Vec::new(),
             avg_history: Vec::new(),
@@ -590,6 +626,26 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                             0x5E77_BEEF,
                         )
                     });
+                    let challenger_military = benchmark_military_quality(
+                        challenger
+                            .as_ref()
+                            .expect("benchmarked challenger should exist"),
+                        &base,
+                        stage,
+                        gate_episode,
+                        LOGISTICS_GATE_WORLDS,
+                        0xA11C_BEEF,
+                    );
+                    let reigning_military = champion.as_ref().map(|brain| {
+                        benchmark_military_quality(
+                            brain,
+                            &base,
+                            stage,
+                            gate_episode,
+                            LOGISTICS_GATE_WORLDS,
+                            0xA11C_BEEF,
+                        )
+                    });
                     let rejections = champion_promotion_rejections(
                         &hq,
                         reigning.as_ref(),
@@ -599,6 +655,8 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                         reigning_trade.as_ref(),
                         &challenger_settlement,
                         reigning_settlement.as_ref(),
+                        &challenger_military,
+                        reigning_military.as_ref(),
                     );
                     let accepted = rejections.is_empty();
                     gate_result = Some((
@@ -607,6 +665,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                         challenger_logistics,
                         challenger_trade,
                         challenger_settlement,
+                        challenger_military,
                     ));
                     if accepted {
                         champion = challenger;
@@ -632,7 +691,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
             append(
                 log_path,
                 &format!(
-                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} haul {:.2} roads {:.2} reserve {:.2} tasks {:.2} care {:.2} trade {:.2} infrastructure {:.2} tech {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
+                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} haul {:.2} roads {:.2} reserve {:.2} tasks {:.2} care {:.2} trade {:.2} infrastructure {:.2} tech {:.2} military {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
                     champ_score,
                     cq.robust_survival,
                     cq.security,
@@ -645,13 +704,16 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                     cq.trade,
                     cq.infrastructure,
                     cq.technology,
+                    cq.military,
                     cq.routing_entropy,
                     cq.expert_coverage,
                     BENCH_WORLDS,
                     tr.stage
                 ),
             );
-            if let Some((accepted, rejections, logistics, trade, settlement)) = gate_result {
+            if let Some((accepted, rejections, logistics, trade, settlement, military)) =
+                gate_result
+            {
                 let verdict = if accepted { "accepted" } else { "rejected" };
                 append(
                     log_path,
@@ -667,6 +729,17 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                         } else {
                             rejections.join(", ")
                         },
+                    ),
+                );
+                append(
+                    log_path,
+                    &format!(
+                        "    [military gate] {verdict}: survival {:+.3}, security {:+.3}, ore {:.1}, equipment {:.1}, pipeline {:.2}\n",
+                        military.clan_survival_delta,
+                        military.security_delta,
+                        military.enabled.ore_delivered,
+                        military.enabled.equipment_completed,
+                        military.enabled.pipeline_world_fraction,
                     ),
                 );
                 append(
@@ -810,6 +883,7 @@ impl Trainer {
         self.mean_trade = best_quality.trade;
         self.mean_infrastructure = best_quality.infrastructure;
         self.mean_technology = best_quality.technology;
+        self.mean_military = best_quality.military;
         self.routing_balance = best_quality.routing_entropy * best_quality.expert_coverage;
         let improvement_margin = self.best_ever.abs().max(1.0) * 0.002;
         if self.best_fitness > self.best_ever + improvement_margin {
@@ -1196,6 +1270,7 @@ impl QualityTotals {
         self.sum.trade += score.trade;
         self.sum.infrastructure += score.infrastructure;
         self.sum.technology += score.technology;
+        self.sum.military += score.military;
         self.sum.defense += score.defense;
         self.sum.combat += score.combat;
         self.robust_survival = self.robust_survival.min(score.survival);
@@ -1231,6 +1306,7 @@ impl QualityTotals {
             trade: self.sum.trade * inv,
             infrastructure: self.sum.infrastructure * inv,
             technology: self.sum.technology * inv,
+            military: self.sum.military * inv,
             defense: self.sum.defense * inv,
             combat: self.sum.combat * inv,
             routing_entropy,
@@ -1586,6 +1662,7 @@ pub fn benchmark_ai_quality(
         mean_trade: quality.trade,
         mean_infrastructure: quality.infrastructure,
         mean_technology: quality.technology,
+        mean_military: quality.military,
         routing_entropy: quality.routing_entropy,
         expert_coverage: quality.expert_coverage,
         eligible: quality.eligible && fairness_delta >= -0.05,
@@ -1709,6 +1786,9 @@ fn run_logistics_benchmark_arm(
     community_logistics: bool,
 ) -> LogisticsBenchmarkObservation {
     let mut world = World::new(spec.world_size, seed);
+    // Preserve the historical logistics contract; the newer military milestone
+    // has its own integrated paired gate below.
+    world.community_military = false;
     world.params = spec.params.clone();
     world.params.community_logistics = community_logistics;
     let ids = world.setup_arena(std::slice::from_ref(brain), spec.trees, spec.neutrals);
@@ -1885,6 +1965,7 @@ fn run_care_benchmark_arm(
     community_care: bool,
 ) -> CareBenchmarkObservation {
     let mut world = World::new(spec.world_size, seed);
+    world.community_military = false;
     world.params = spec.params.clone();
     world.params.community_care = community_care;
     let brains = [brain.clone(), brain.clone()];
@@ -2063,6 +2144,7 @@ fn run_trade_benchmark_arm(
     community_trade: bool,
 ) -> TradeBenchmarkObservation {
     let mut world = World::new(spec.world_size, seed);
+    world.community_military = false;
     world.params = spec.params.clone();
     world.params.community_trade = community_trade;
     let brains = [brain.clone(), brain.clone(), brain.clone()];
@@ -2244,6 +2326,7 @@ fn run_settlement_benchmark_arm(
     community_settlement: bool,
 ) -> SettlementBenchmarkObservation {
     let mut world = World::new(spec.world_size, seed);
+    world.community_military = false;
     world.params = spec.params.clone();
     world.community_settlement = community_settlement;
     let brains = [brain.clone(), brain.clone(), brain.clone()];
@@ -2305,6 +2388,227 @@ fn run_settlement_benchmark_arm(
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy)]
+struct MilitaryBenchmarkObservation {
+    quality: QualityScore,
+    clan_cohort_survival: f32,
+    neutral_cohort_survival: f32,
+    ore_delivered: f32,
+    production_work: f32,
+    equipment_completed: f32,
+    equipped_member_ticks: f32,
+    causal_combat_value: f32,
+    unsafe_work_ticks: f32,
+    completed_pipeline: bool,
+}
+
+#[cfg(test)]
+struct MilitaryArmTotals {
+    quality: QualityTotals,
+    clan_cohort_survival: f32,
+    neutral_cohort_survival: f32,
+    worst_fairness_delta: f32,
+    ore_delivered: f32,
+    production_work: f32,
+    equipment_completed: f32,
+    equipped_member_ticks: f32,
+    causal_combat_value: f32,
+    unsafe_work_ticks: f32,
+    completed_pipelines: u32,
+    count: u32,
+}
+
+#[cfg(test)]
+impl Default for MilitaryArmTotals {
+    fn default() -> Self {
+        Self {
+            quality: QualityTotals::default(),
+            clan_cohort_survival: 0.0,
+            neutral_cohort_survival: 0.0,
+            worst_fairness_delta: f32::INFINITY,
+            ore_delivered: 0.0,
+            production_work: 0.0,
+            equipment_completed: 0.0,
+            equipped_member_ticks: 0.0,
+            causal_combat_value: 0.0,
+            unsafe_work_ticks: 0.0,
+            completed_pipelines: 0,
+            count: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl MilitaryArmTotals {
+    fn add(&mut self, observation: MilitaryBenchmarkObservation) {
+        self.quality.add(observation.quality);
+        self.clan_cohort_survival += observation.clan_cohort_survival;
+        self.neutral_cohort_survival += observation.neutral_cohort_survival;
+        self.worst_fairness_delta = self
+            .worst_fairness_delta
+            .min(observation.clan_cohort_survival - observation.neutral_cohort_survival);
+        self.ore_delivered += observation.ore_delivered;
+        self.production_work += observation.production_work;
+        self.equipment_completed += observation.equipment_completed;
+        self.equipped_member_ticks += observation.equipped_member_ticks;
+        self.causal_combat_value += observation.causal_combat_value;
+        self.unsafe_work_ticks += observation.unsafe_work_ticks;
+        self.completed_pipelines += observation.completed_pipeline as u32;
+        self.count += 1;
+    }
+
+    fn finish(self, brain: &Brain) -> MilitaryBenchmarkArm {
+        if self.count == 0 {
+            return MilitaryBenchmarkArm::default();
+        }
+        let inv = 1.0 / self.count as f32;
+        let quality = self.quality.finish(brain);
+        let clan_cohort_survival = self.clan_cohort_survival * inv;
+        let neutral_cohort_survival = self.neutral_cohort_survival * inv;
+        MilitaryBenchmarkArm {
+            robust_survival: quality.robust_survival,
+            mean_security: quality.security,
+            clan_cohort_survival,
+            neutral_cohort_survival,
+            fairness_delta: clan_cohort_survival - neutral_cohort_survival,
+            robust_fairness_delta: quality.robust_fairness,
+            worst_fairness_delta: self.worst_fairness_delta,
+            military: quality.military,
+            ore_delivered: self.ore_delivered * inv,
+            production_work: self.production_work * inv,
+            equipment_completed: self.equipment_completed * inv,
+            equipped_member_ticks: self.equipped_member_ticks * inv,
+            causal_combat_value: self.causal_combat_value * inv,
+            unsafe_work_ticks: self.unsafe_work_ticks * inv,
+            pipeline_world_fraction: self.completed_pipelines as f32 * inv,
+            eligible: quality.eligible
+                && clan_cohort_survival - neutral_cohort_survival >= FAIRNESS_FLOOR
+                && self.worst_fairness_delta >= FAIRNESS_FLOOR,
+        }
+    }
+}
+
+#[cfg(test)]
+pub fn benchmark_military_quality(
+    brain: &Brain,
+    base: &Params,
+    stage: u32,
+    episode: i32,
+    n_worlds: usize,
+    seed: u64,
+) -> MilitaryBenchmarkReport {
+    if n_worlds == 0 {
+        return MilitaryBenchmarkReport::default();
+    }
+    let paired: Vec<(MilitaryBenchmarkObservation, MilitaryBenchmarkObservation)> = (0..n_worlds)
+        .into_par_iter()
+        .map(|world_index| {
+            let mut rng = Rng::new(seed ^ (world_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let effective_stage = (world_index as u32) % (stage + 1);
+            let spec = random_world_spec(base, &mut rng, effective_stage);
+            let arena_seed =
+                seed.wrapping_add((world_index as u64).wrapping_mul(0xA24B_AED4_963E_E407));
+            (
+                run_military_benchmark_arm(brain, &spec, episode, arena_seed, true),
+                run_military_benchmark_arm(brain, &spec, episode, arena_seed, false),
+            )
+        })
+        .collect();
+    let mut enabled_totals = MilitaryArmTotals::default();
+    let mut disabled_totals = MilitaryArmTotals::default();
+    for (enabled, disabled) in paired {
+        enabled_totals.add(enabled);
+        disabled_totals.add(disabled);
+    }
+    let enabled = enabled_totals.finish(brain);
+    let disabled = disabled_totals.finish(brain);
+    let clan_survival_delta = enabled.clan_cohort_survival - disabled.clan_cohort_survival;
+    MilitaryBenchmarkReport {
+        worlds: n_worlds,
+        clan_survival_delta,
+        security_delta: enabled.mean_security - disabled.mean_security,
+        fairness_delta: enabled.fairness_delta - disabled.fairness_delta,
+        survival_non_regression: enabled.robust_survival + 1e-6 >= disabled.robust_survival
+            && clan_survival_delta >= -1e-6,
+        enabled,
+        disabled,
+    }
+}
+
+#[cfg(test)]
+fn run_military_benchmark_arm(
+    brain: &Brain,
+    spec: &WorldSpec,
+    episode: i32,
+    seed: u64,
+    community_military: bool,
+) -> MilitaryBenchmarkObservation {
+    let mut world = World::new(spec.world_size, seed);
+    world.params = spec.params.clone();
+    world.community_military = community_military;
+    let brains = [brain.clone(), brain.clone(), brain.clone()];
+    let ids = world.setup_arena(&brains, spec.trees, spec.neutrals);
+    let clan_id = ids[0];
+    let clan_cohort: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.clan == clan_id)
+        .map(|entity| entity.id)
+        .collect();
+    let neutral_cohort: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.clan < 0)
+        .map(|entity| entity.id)
+        .collect();
+    for _ in 0..episode {
+        world.step();
+    }
+    let alive: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.is_active())
+        .map(|entity| entity.id)
+        .collect();
+    let cohort_ratio = |cohort: &HashSet<u32>| {
+        if cohort.is_empty() {
+            1.0
+        } else {
+            cohort.iter().filter(|id| alive.contains(id)).count() as f32 / cohort.len() as f32
+        }
+    };
+    let clan_cohort_survival = cohort_ratio(&clan_cohort);
+    let neutral_cohort_survival = cohort_ratio(&neutral_cohort);
+    let mut quality = score_clan_quality(&world, clan_id);
+    quality.fairness = clan_cohort_survival - neutral_cohort_survival;
+    quality.robust_fairness = quality.fairness;
+    quality.eligible &= quality.fairness >= FAIRNESS_FLOOR;
+    let state = world
+        .militaries
+        .iter()
+        .find(|state| state.clan_id == clan_id)
+        .copied()
+        .unwrap_or_default();
+    let causal_combat_value =
+        (state.stats.bonus_damage_milli + state.stats.damage_prevented_milli) as f32 / 1000.0;
+    let completed_pipeline = state.stats.ore_delivered > 0
+        && state.stats.equipment_completed > 0
+        && state.stats.equipped_member_ticks > 0;
+    MilitaryBenchmarkObservation {
+        quality,
+        clan_cohort_survival,
+        neutral_cohort_survival,
+        ore_delivered: state.stats.ore_delivered as f32,
+        production_work: state.stats.production_work as f32,
+        equipment_completed: state.stats.equipment_completed as f32,
+        equipped_member_ticks: state.stats.equipped_member_ticks as f32,
+        causal_combat_value,
+        unsafe_work_ticks: state.stats.unsafe_work_ticks as f32,
+        completed_pipeline,
+    }
+}
+
+#[cfg(test)]
 fn quality_better(challenger: &QualityScore, reigning: &QualityScore) -> bool {
     match (challenger.eligible, reigning.eligible) {
         (true, false) => true,
@@ -2323,6 +2627,8 @@ fn champion_promotion_rejections(
     reigning_trade: Option<&TradeBenchmarkReport>,
     settlement: &SettlementBenchmarkReport,
     reigning_settlement: Option<&SettlementBenchmarkReport>,
+    military: &MilitaryBenchmarkReport,
+    reigning_military: Option<&MilitaryBenchmarkReport>,
 ) -> Vec<&'static str> {
     let mut reasons = Vec::new();
     if !challenger.eligible {
@@ -2481,6 +2787,9 @@ fn champion_promotion_rejections(
     if settlement.enabled.fairness_delta < PROMOTION_FAIRNESS_FLOOR {
         reasons.push("settlement-enabled clans underperform neutrals");
     }
+    if settlement.enabled.robust_fairness_delta < FAIRNESS_FLOOR {
+        reasons.push("settlement-enabled worst-world fairness below floor");
+    }
     if !settlement.survival_non_regression {
         reasons.push("settlement reduces paired survival");
     }
@@ -2521,6 +2830,82 @@ fn champion_promotion_rejections(
             < current.enabled.research_ticks
         {
             reasons.push("physical workshop research regressed from champion");
+        }
+    }
+
+    if !military.enabled.eligible {
+        reasons.push("military-enabled benchmark ineligible");
+    }
+    if military.enabled.robust_survival < PROMOTION_SURVIVAL_FLOOR {
+        reasons.push("military-enabled survival below promotion floor");
+    }
+    if military.enabled.mean_security < PROMOTION_SECURITY_FLOOR {
+        reasons.push("military-enabled security below promotion floor");
+    }
+    if military.enabled.fairness_delta < PROMOTION_FAIRNESS_FLOOR {
+        reasons.push("military-enabled clans underperform neutrals");
+    }
+    if military.enabled.worst_fairness_delta < FAIRNESS_FLOOR {
+        reasons.push("military-enabled worst-world fairness below floor");
+    }
+    if !military.survival_non_regression {
+        reasons.push("military reduces paired survival");
+    }
+    if military.security_delta < -PROMOTION_SECURITY_TOLERANCE {
+        reasons.push("military reduces paired food security");
+    }
+    if military.fairness_delta < -PROMOTION_SECURITY_TOLERANCE {
+        reasons.push("military reduces paired clan fairness");
+    }
+    if military.enabled.unsafe_work_ticks > 0.0 {
+        reasons.push("military diverts labor below the food-safety gate");
+    }
+    if military.enabled.ore_delivered <= 0.0 {
+        reasons.push("military does not extract and deliver physical ore");
+    }
+    if military.enabled.production_work <= 0.0 || military.enabled.equipment_completed <= 0.0 {
+        reasons.push("military does not complete physical production");
+    }
+    if military.enabled.equipped_member_ticks <= 0.0 {
+        reasons.push("military produces no owned equipment");
+    }
+    if military.enabled.pipeline_world_fraction <= 0.0 {
+        reasons.push("military fails to complete the physical supply chain");
+    }
+    if let Some(current) = reigning_military {
+        if military.enabled.robust_survival + f32::EPSILON < current.enabled.robust_survival {
+            reasons.push("paired military survival regressed from champion");
+        }
+        if military.enabled.mean_security + PROMOTION_SECURITY_TOLERANCE
+            < current.enabled.mean_security
+        {
+            reasons.push("paired military security regressed from champion");
+        }
+        if military.enabled.fairness_delta + PROMOTION_SECURITY_TOLERANCE
+            < current.enabled.fairness_delta
+        {
+            reasons.push("paired military fairness regressed from champion");
+        }
+        if military.enabled.ore_delivered + PROMOTION_COVERAGE_TOLERANCE
+            < current.enabled.ore_delivered
+        {
+            reasons.push("physical ore supply regressed from champion");
+        }
+        if military.enabled.equipment_completed + PROMOTION_COVERAGE_TOLERANCE
+            < current.enabled.equipment_completed
+        {
+            reasons.push("physical military production regressed from champion");
+        }
+        if military.enabled.equipped_member_ticks + PROMOTION_COVERAGE_TOLERANCE
+            < current.enabled.equipped_member_ticks
+        {
+            reasons.push("equipment ownership regressed from champion");
+        }
+        if current.enabled.causal_combat_value > 0.0
+            && military.enabled.causal_combat_value + PROMOTION_COVERAGE_TOLERANCE
+                < current.enabled.causal_combat_value
+        {
+            reasons.push("causal military value regressed from champion");
         }
     }
     reasons
@@ -2642,6 +3027,7 @@ mod tests {
         assert!((a.mean_trade - b.mean_trade).abs() < 1e-6);
         assert!((a.mean_infrastructure - b.mean_infrastructure).abs() < 1e-6);
         assert!((a.mean_technology - b.mean_technology).abs() < 1e-6);
+        assert!((a.mean_military - b.mean_military).abs() < 1e-6);
         assert!((0.0..=1.0).contains(&a.routing_entropy));
         assert!((0.0..=1.0).contains(&a.expert_coverage));
         assert!(
@@ -2918,6 +3304,73 @@ mod tests {
         );
     }
 
+    #[test]
+    fn military_ablation_is_deterministic() {
+        let brain = Brain::load(CHAMPION_PATH).expect("tracked champion.bin should load");
+        let base = Params::default();
+        let a = benchmark_military_quality(&brain, &base, 3, 2000, 4, 0xA11C_E001);
+        let b = benchmark_military_quality(&brain, &base, 3, 2000, 4, 0xA11C_E001);
+        assert!((a.clan_survival_delta - b.clan_survival_delta).abs() < 1e-6);
+        assert!((a.security_delta - b.security_delta).abs() < 1e-6);
+        assert!((a.enabled.ore_delivered - b.enabled.ore_delivered).abs() < 1e-6);
+        assert!((a.enabled.production_work - b.enabled.production_work).abs() < 1e-6);
+        assert_eq!(a.disabled.ore_delivered, 0.0);
+        assert_eq!(a.disabled.production_work, 0.0);
+        assert_eq!(a.disabled.equipment_completed, 0.0);
+        assert_eq!(a.disabled.equipped_member_ticks, 0.0);
+    }
+
+    #[test]
+    fn tracked_champion_military_completes_safe_physical_pipeline() {
+        let brain = Brain::load(CHAMPION_PATH).expect("tracked champion.bin should load");
+        let report = benchmark_military_quality(
+            &brain,
+            &Params::default(),
+            MAX_STAGE,
+            4000,
+            13,
+            0xA11C_BEEF,
+        );
+        println!("Military Equipment V1 paired benchmark: {report:#?}");
+        assert_eq!(report.worlds, 13);
+        assert!(
+            report.enabled.eligible,
+            "military enabled ineligible: {report:#?}"
+        );
+        assert!(report.enabled.robust_survival >= PROMOTION_SURVIVAL_FLOOR);
+        assert!(report.enabled.mean_security >= PROMOTION_SECURITY_FLOOR);
+        assert!(report.enabled.fairness_delta >= 0.0);
+        assert!(report.enabled.neutral_cohort_survival >= 0.0);
+        assert!(report.enabled.worst_fairness_delta >= FAIRNESS_FLOOR);
+        assert!(report.enabled.robust_fairness_delta >= FAIRNESS_FLOOR);
+        assert!(report.survival_non_regression);
+        assert!(report.security_delta >= -PROMOTION_SECURITY_TOLERANCE);
+        assert!(report.fairness_delta >= -PROMOTION_SECURITY_TOLERANCE);
+        assert_eq!(report.enabled.unsafe_work_ticks, 0.0);
+        assert!(
+            report.enabled.ore_delivered > 0.0,
+            "no physical ore: {report:#?}"
+        );
+        assert!(
+            report.enabled.production_work > 0.0,
+            "no forge work: {report:#?}"
+        );
+        assert!(
+            report.enabled.equipment_completed > 0.0,
+            "no equipment: {report:#?}"
+        );
+        assert!(
+            report.enabled.equipped_member_ticks > 0.0,
+            "no ownership: {report:#?}"
+        );
+        assert!(
+            report.enabled.pipeline_world_fraction > 0.0,
+            "no full pipeline: {report:#?}"
+        );
+        assert!(report.enabled.military > 0.0, "no readiness: {report:#?}");
+        assert!(report.enabled.causal_combat_value >= 0.0);
+    }
+
     fn promotion_quality(fitness: f32) -> QualityScore {
         QualityScore {
             fitness,
@@ -3047,6 +3500,47 @@ mod tests {
         }
     }
 
+    fn promotion_military(
+        ore_delivered: f32,
+        equipment_completed: f32,
+        equipped_member_ticks: f32,
+    ) -> MilitaryBenchmarkReport {
+        let enabled = MilitaryBenchmarkArm {
+            robust_survival: 1.0,
+            mean_security: 0.90,
+            clan_cohort_survival: 1.0,
+            neutral_cohort_survival: 0.95,
+            fairness_delta: 0.05,
+            robust_fairness_delta: 0.0,
+            worst_fairness_delta: 0.0,
+            military: 0.25,
+            ore_delivered,
+            production_work: equipment_completed * 16.0,
+            equipment_completed,
+            equipped_member_ticks,
+            pipeline_world_fraction: 0.5,
+            eligible: true,
+            ..MilitaryBenchmarkArm::default()
+        };
+        MilitaryBenchmarkReport {
+            worlds: 13,
+            enabled,
+            disabled: MilitaryBenchmarkArm {
+                robust_survival: 1.0,
+                mean_security: 0.90,
+                clan_cohort_survival: 1.0,
+                neutral_cohort_survival: 0.95,
+                fairness_delta: 0.05,
+                robust_fairness_delta: 0.0,
+                worst_fairness_delta: 0.0,
+                eligible: true,
+                ..MilitaryBenchmarkArm::default()
+            },
+            survival_non_regression: true,
+            ..MilitaryBenchmarkReport::default()
+        }
+    }
+
     #[test]
     fn champion_promotion_accepts_a_safe_causal_improvement() {
         let incumbent = promotion_quality(100.0);
@@ -3057,6 +3551,8 @@ mod tests {
         let challenger_trade = promotion_trade(0.45, 12.0);
         let incumbent_settlement = promotion_settlement(0.30, 6.0);
         let challenger_settlement = promotion_settlement(0.34, 8.0);
+        let incumbent_military = promotion_military(12.0, 2.0, 200.0);
+        let challenger_military = promotion_military(14.0, 3.0, 240.0);
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
@@ -3066,6 +3562,8 @@ mod tests {
             Some(&incumbent_trade),
             &challenger_settlement,
             Some(&incumbent_settlement),
+            &challenger_military,
+            Some(&incumbent_military),
         );
         assert!(
             rejections.is_empty(),
@@ -3081,6 +3579,7 @@ mod tests {
         let logistics = promotion_logistics(0.52, 0.32);
         let trade = promotion_trade(0.45, 12.0);
         let settlement = promotion_settlement(0.34, 8.0);
+        let military = promotion_military(14.0, 3.0, 240.0);
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
@@ -3090,6 +3589,8 @@ mod tests {
             Some(&trade),
             &settlement,
             Some(&settlement),
+            &military,
+            Some(&military),
         );
         assert!(rejections.contains(&"robust survival below promotion floor"));
         assert!(rejections.contains(&"robust survival regressed from champion"));
@@ -3105,6 +3606,7 @@ mod tests {
         challenger_logistics.survival_non_regression = false;
         let trade = promotion_trade(0.45, 12.0);
         let settlement = promotion_settlement(0.34, 8.0);
+        let military = promotion_military(14.0, 3.0, 240.0);
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
@@ -3114,6 +3616,8 @@ mod tests {
             Some(&trade),
             &settlement,
             Some(&settlement),
+            &military,
+            Some(&military),
         );
         assert!(rejections.contains(&"logistics reduces paired survival"));
         assert!(rejections.contains(&"logistics reduces paired food security"));
@@ -3129,6 +3633,7 @@ mod tests {
         let incumbent_trade = promotion_trade(0.50, 12.0);
         let mut challenger_trade = promotion_trade(0.0, 0.0);
         let settlement = promotion_settlement(0.34, 8.0);
+        let military = promotion_military(14.0, 3.0, 240.0);
         challenger_trade.security_delta = -0.02;
         let rejections = champion_promotion_rejections(
             &challenger,
@@ -3139,6 +3644,8 @@ mod tests {
             Some(&incumbent_trade),
             &settlement,
             Some(&settlement),
+            &military,
+            Some(&military),
         );
         assert!(rejections.contains(&"trade reduces paired food security"));
         assert!(rejections.contains(&"trade does not deliver physical material"));
@@ -3153,6 +3660,7 @@ mod tests {
         let trade = promotion_trade(0.45, 12.0);
         let incumbent_settlement = promotion_settlement(0.40, 8.0);
         let mut challenger_settlement = promotion_settlement(0.0, 0.0);
+        let military = promotion_military(14.0, 3.0, 240.0);
         challenger_settlement.enabled.construction_work = 0.0;
         challenger_settlement.enabled.completed_buildings = 0.0;
         challenger_settlement.security_delta = -0.02;
@@ -3166,6 +3674,8 @@ mod tests {
             Some(&trade),
             &challenger_settlement,
             Some(&incumbent_settlement),
+            &military,
+            Some(&military),
         );
         assert!(rejections.contains(&"settlement reduces paired survival"));
         assert!(rejections.contains(&"settlement reduces paired food security"));
@@ -3183,6 +3693,7 @@ mod tests {
         incumbent_settlement.enabled.technology = 0.50;
         incumbent_settlement.enabled.research_ticks = 24.0;
         let challenger_settlement = promotion_settlement(0.34, 8.0);
+        let military = promotion_military(14.0, 3.0, 240.0);
         let rejections = champion_promotion_rejections(
             &quality,
             Some(&quality),
@@ -3192,9 +3703,70 @@ mod tests {
             Some(&trade),
             &challenger_settlement,
             Some(&incumbent_settlement),
+            &military,
+            Some(&military),
         );
         assert!(rejections.contains(&"settlement technology regressed from champion"));
         assert!(rejections.contains(&"physical workshop research regressed from champion"));
+    }
+
+    #[test]
+    fn champion_promotion_rejects_hollow_or_unsafe_military_pipeline() {
+        let quality = promotion_quality(110.0);
+        let logistics = promotion_logistics(0.52, 0.32);
+        let trade = promotion_trade(0.45, 12.0);
+        let settlement = promotion_settlement(0.34, 8.0);
+        let incumbent_military = promotion_military(14.0, 3.0, 240.0);
+        let mut challenger_military = promotion_military(0.0, 0.0, 0.0);
+        challenger_military.enabled.production_work = 0.0;
+        challenger_military.enabled.pipeline_world_fraction = 0.0;
+        challenger_military.enabled.unsafe_work_ticks = 1.0;
+        challenger_military.security_delta = -0.02;
+        challenger_military.survival_non_regression = false;
+        let rejections = champion_promotion_rejections(
+            &quality,
+            Some(&quality),
+            &logistics,
+            Some(&logistics),
+            &trade,
+            Some(&trade),
+            &settlement,
+            Some(&settlement),
+            &challenger_military,
+            Some(&incumbent_military),
+        );
+        assert!(rejections.contains(&"military reduces paired survival"));
+        assert!(rejections.contains(&"military reduces paired food security"));
+        assert!(rejections.contains(&"military diverts labor below the food-safety gate"));
+        assert!(rejections.contains(&"military does not extract and deliver physical ore"));
+        assert!(rejections.contains(&"military does not complete physical production"));
+        assert!(rejections.contains(&"military produces no owned equipment"));
+        assert!(rejections.contains(&"military fails to complete the physical supply chain"));
+    }
+
+    #[test]
+    fn champion_promotion_rejects_military_supply_and_ownership_regression() {
+        let quality = promotion_quality(110.0);
+        let logistics = promotion_logistics(0.52, 0.32);
+        let trade = promotion_trade(0.45, 12.0);
+        let settlement = promotion_settlement(0.34, 8.0);
+        let incumbent_military = promotion_military(20.0, 4.0, 400.0);
+        let challenger_military = promotion_military(10.0, 2.0, 200.0);
+        let rejections = champion_promotion_rejections(
+            &quality,
+            Some(&quality),
+            &logistics,
+            Some(&logistics),
+            &trade,
+            Some(&trade),
+            &settlement,
+            Some(&settlement),
+            &challenger_military,
+            Some(&incumbent_military),
+        );
+        assert!(rejections.contains(&"physical ore supply regressed from champion"));
+        assert!(rejections.contains(&"physical military production regressed from champion"));
+        assert!(rejections.contains(&"equipment ownership regressed from champion"));
     }
 
     #[test]

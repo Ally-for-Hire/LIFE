@@ -16,6 +16,11 @@ use crate::clan::{hue_color, Clan, ClanMode};
 use crate::diplomacy::DiplomacyLedger;
 use crate::entity::{Entity, Goal};
 use crate::grid::{terrain, Grid, NO_OWNER};
+use crate::military::{
+    add_entity_ore, assign_equipment, equipment_for, ore_cargo_for, remove_entity_equipment,
+    remove_entity_ore_cargo, take_entity_ore, ClanMilitary, EntityEquipment, EntityOreCargo,
+    EquipmentKind, OreDeposit, OreDepositId, MAX_CARRIED_ORE,
+};
 use crate::rng::Rng;
 use crate::settlement::{
     active_building_counts, building_counts, development_score, Building, BuildingId, BuildingKind,
@@ -101,6 +106,11 @@ const SETTLEMENT_WOOD_MARGIN: i32 = 4;
 const WALL_DEFENSE_RADIUS: i32 = 4;
 const WALL_DAMAGE_REDUCTION: f32 = 0.25;
 const HOUSE_HEAL_BONUS: f32 = 0.02;
+const ORE_DEPOSIT_AMOUNT: u16 = 48;
+const ORE_GLOBAL_SPACING: usize = 97;
+const MILITARY_ORE_TARGET_PER_MEMBER: i32 = 2;
+const MILITARY_WOOD_MARGIN: i32 = 8;
+const MILITARY_PLAN_INTERVAL: i32 = 30;
 /// Above this hunger, an outsider will steal from foreign farmland to survive —
 /// which makes them a trespasser and triggers the owner's defense. Below it,
 /// a clan's crops feed only its own people (despotic exclusion).
@@ -227,9 +237,15 @@ pub struct World {
     pub building_cells: Vec<u32>,
     pub settlements: Vec<ClanSettlement>,
     pub community_settlement: bool,
+    pub ore_deposits: Vec<OreDeposit>,
+    pub ore_cargo: Vec<EntityOreCargo>,
+    pub militaries: Vec<ClanMilitary>,
+    pub equipment: Vec<EntityEquipment>,
+    pub community_military: bool,
     next_entity_id: u32,
     next_clan_id: i32,
     next_building_id: u32,
+    next_ore_deposit_id: u32,
     pellet_total: usize,
     pub deaths_starved: u64,
     pub deaths_combat: u64,
@@ -265,9 +281,15 @@ impl World {
             building_cells: vec![0; (size * size) as usize],
             settlements: Vec::new(),
             community_settlement: true,
+            ore_deposits: Vec::new(),
+            ore_cargo: Vec::new(),
+            militaries: Vec::new(),
+            equipment: Vec::new(),
+            community_military: true,
             next_entity_id: 1,
             next_clan_id: 1,
             next_building_id: 1,
+            next_ore_deposit_id: 1,
             pellet_total: 0,
             deaths_starved: 0,
             deaths_combat: 0,
@@ -315,9 +337,14 @@ impl World {
         self.buildings.clear();
         self.building_cells.fill(0);
         self.settlements.clear();
+        self.ore_deposits.clear();
+        self.ore_cargo.clear();
+        self.militaries.clear();
+        self.equipment.clear();
         self.disaster_level = 0.0;
         self.next_clan_id = 1;
         self.next_building_id = 1;
+        self.next_ore_deposit_id = 1;
     }
 
     // --- terrain ---
@@ -427,6 +454,93 @@ impl World {
             } else {
                 0
             };
+        }
+    }
+
+    /// Deterministic finite mineral deposits. Their placement consumes no RNG,
+    /// so military treatment/control arms begin from the same world stream.
+    fn generate_ore_deposits(&mut self) {
+        self.ore_deposits.clear();
+        self.next_ore_deposit_id = 1;
+        for index in 0..self.grid.terrain.len() {
+            let terrain = self.grid.terrain[index];
+            if terrain == terrain::WATER
+                || terrain == terrain::MOUNTAIN
+                || self.grid.wood[index] > 0
+            {
+                continue;
+            }
+            let hash = index
+                .wrapping_mul(0x9E37_79B1usize)
+                .wrapping_add(self.grid.fertility[index] as usize * 131);
+            if hash % ORE_GLOBAL_SPACING != 0 && terrain != terrain::HILL {
+                continue;
+            }
+            if terrain == terrain::HILL && hash % 31 != 0 {
+                continue;
+            }
+            let x = (index as i32) % self.grid.size;
+            let y = (index as i32) / self.grid.size;
+            self.push_ore_deposit(x, y, ORE_DEPOSIT_AMOUNT);
+        }
+    }
+
+    fn push_ore_deposit(&mut self, x: i32, y: i32, amount: u16) {
+        if self
+            .ore_deposits
+            .iter()
+            .any(|deposit| deposit.x == x && deposit.y == y)
+        {
+            return;
+        }
+        let id = OreDepositId(self.next_ore_deposit_id);
+        self.next_ore_deposit_id = self.next_ore_deposit_id.saturating_add(1);
+        self.ore_deposits.push(OreDeposit::new(id, x, y, amount));
+    }
+
+    fn initialize_military_resources(&mut self) {
+        self.generate_ore_deposits();
+        let settlements: Vec<(i32, i32, i32)> = self
+            .clans
+            .iter()
+            .filter_map(|clan| clan.stockpile.map(|(x, y)| (clan.id, x, y)))
+            .collect();
+        for (clan_id, x, y) in settlements {
+            self.ensure_ore_near(clan_id, x, y);
+        }
+    }
+
+    /// Every settlement gets one reachable bootstrap deposit. This prevents a
+    /// zero pipeline from meaning unlucky geography rather than policy failure.
+    fn ensure_ore_near(&mut self, clan_id: i32, x: i32, y: i32) {
+        let existing = self.ore_deposits.iter().any(|deposit| {
+            !deposit.is_depleted()
+                && (deposit.x - x).abs().max((deposit.y - y).abs()) <= 10
+                && !self.is_foreign_tile(deposit.x, deposit.y, clan_id)
+        });
+        if existing {
+            return;
+        }
+        let mut candidates = Vec::new();
+        for yy in (y - 8).max(0)..=(y + 8).min(self.grid.size - 1) {
+            for xx in (x - 8).max(0)..=(x + 8).min(self.grid.size - 1) {
+                if (xx, yy) == (x, y) || !self.is_passable(xx, yy) {
+                    continue;
+                }
+                let index = self.grid.idx(xx, yy);
+                if self.grid.wood[index] > 0 || self.building_cells[index] != 0 {
+                    continue;
+                }
+                if self.is_foreign_tile(xx, yy, clan_id) {
+                    continue;
+                }
+                let distance = (xx - x).abs().max((yy - y).abs());
+                candidates.push((distance, index, xx, yy));
+            }
+        }
+        candidates.sort_unstable();
+        if let Some((_, _, dx, dy)) = candidates.first().copied() {
+            self.push_ore_deposit(dx, dy, ORE_DEPOSIT_AMOUNT);
         }
     }
 
@@ -794,12 +908,14 @@ impl World {
         self.clans.push(clan);
         let idx = self.clans.len() - 1;
         self.claim_area(idx, x, y, INITIAL_CLAIM_RADIUS);
+        self.ensure_ore_near(id, x, y);
         id
     }
 
     pub fn populate(&mut self, neutrals: i32, trees: i32, clans: i32) {
         self.clear();
         self.generate_terrain();
+        self.generate_ore_deposits();
         for _ in 0..trees {
             let (x, y) = self.random_fertile_land_cell();
             let last = -self.rng.below(self.params.tree_interval.max(1));
@@ -825,6 +941,7 @@ impl World {
     pub fn setup_arena(&mut self, brains: &[Brain], trees: i32, neutrals: i32) -> Vec<i32> {
         self.clear();
         self.generate_terrain();
+        self.generate_ore_deposits();
         for _ in 0..trees {
             let (x, y) = self.random_fertile_land_cell();
             let last = -self.rng.below(self.params.tree_interval.max(1));
@@ -1118,6 +1235,120 @@ impl World {
         }
     }
 
+    fn military_index(&self, clan_id: i32) -> Option<usize> {
+        self.militaries
+            .binary_search_by_key(&clan_id, |state| state.clan_id)
+            .ok()
+    }
+
+    fn ensure_military_index(&mut self, clan_id: i32) -> usize {
+        match self
+            .militaries
+            .binary_search_by_key(&clan_id, |state| state.clan_id)
+        {
+            Ok(index) => index,
+            Err(index) => {
+                self.militaries.insert(index, ClanMilitary::new(clan_id));
+                index
+            }
+        }
+    }
+
+    fn military_safety_ready(&self, clan_idx: usize) -> bool {
+        let pop = self.clan_roster_size(clan_idx);
+        pop >= 4
+            && self.clans[clan_idx].food >= pop * STOCKPILE_FOOD_PER_MEMBER
+            && self.clans[clan_idx].reserve_food >= pop * RESERVE_FOOD_PER_MEMBER
+    }
+
+    fn active_workshop(&self, clan_id: i32) -> Option<(i32, i32)> {
+        self.buildings
+            .iter()
+            .filter(|building| {
+                building.clan_id == clan_id
+                    && building.kind == BuildingKind::Workshop
+                    && building.is_active()
+            })
+            .min_by_key(|building| building.id)
+            .map(Building::position)
+    }
+
+    fn military_signals(&self, clan_idx: usize) -> (f32, f32) {
+        if !self.community_military {
+            return (0.0, 0.0);
+        }
+        let clan_id = self.clans[clan_idx].id;
+        let active_ids: Vec<u32> = self
+            .entities
+            .iter()
+            .filter(|entity| entity.clan == clan_id && entity.is_active())
+            .map(|entity| entity.id)
+            .collect();
+        let bonus: u32 = active_ids
+            .iter()
+            .filter_map(|&id| equipment_for(&self.equipment, id))
+            .map(|loadout| loadout.strength_milli().saturating_sub(1000) as u32)
+            .sum();
+        let strength = (bonus as f32 / (active_ids.len().max(1) as f32 * 700.0)).min(1.0);
+        let stored = self
+            .military_index(clan_id)
+            .map_or(0, |index| self.militaries[index].ore_stockpile.max(0));
+        let reachable: i32 = self
+            .ore_deposits
+            .iter()
+            .filter(|deposit| {
+                !deposit.is_depleted()
+                    && self.clans[clan_idx].stockpile.is_some_and(|(x, y)| {
+                        (deposit.x - x).abs().max((deposit.y - y).abs())
+                            <= self.params.home_range.max(1)
+                    })
+                    && !self.is_foreign_tile(deposit.x, deposit.y, clan_id)
+            })
+            .map(|deposit| deposit.remaining as i32)
+            .sum();
+        let ore = ((stored + reachable) as f32
+            / (active_ids.len().max(1) as f32 * ORE_DEPOSIT_AMOUNT as f32))
+            .min(1.0);
+        (strength, ore)
+    }
+
+    fn nearest_ore_deposit(&self, entity: &Entity, radius: i32) -> Option<usize> {
+        self.ore_deposits
+            .iter()
+            .enumerate()
+            .filter(|(_, deposit)| {
+                !deposit.is_depleted()
+                    && (deposit.x - entity.x)
+                        .abs()
+                        .max((deposit.y - entity.y).abs())
+                        <= radius
+                    && !self.is_foreign_tile(deposit.x, deposit.y, entity.clan)
+            })
+            .min_by_key(|(_, deposit)| {
+                (
+                    (deposit.x - entity.x)
+                        .abs()
+                        .max((deposit.y - entity.y).abs()),
+                    deposit.id,
+                )
+            })
+            .map(|(index, _)| index)
+    }
+
+    fn desired_equipment(&self, entity_id: u32, tech: u8) -> Option<EquipmentKind> {
+        let loadout = equipment_for(&self.equipment, entity_id);
+        if loadout.and_then(|gear| gear.weapon).is_none() {
+            return Some(EquipmentKind::Spear);
+        }
+        if tech >= 1 && loadout.and_then(|gear| gear.weapon) == Some(EquipmentKind::Spear) {
+            return Some(EquipmentKind::Sword);
+        }
+        if tech >= 2 && loadout.and_then(|gear| gear.armor).is_none() {
+            return Some(EquipmentKind::Armor);
+        }
+        None
+    }
+
     // --- spatial queries (bounded) ---
     /// Nearest *harvestable* pellet for a forager of `clan`. Prefers the clan's
     /// own farmland, then unclaimed wild food; foreign farmland is only returned
@@ -1395,6 +1626,7 @@ impl World {
         self.refresh_diplomacy();
         self.clan_think();
         self.plan_settlement_projects();
+        self.plan_military_work();
         self.prepare_rescues();
 
         let mut entities = std::mem::take(&mut self.entities);
@@ -1405,6 +1637,7 @@ impl World {
         self.entities = entities;
         self.advance_rescues();
         self.build_roads();
+        self.record_military_readiness();
 
         self.resolve_recruitment();
         self.resolve_combat();
@@ -1420,6 +1653,31 @@ impl World {
         }
         if self.tick % TERRITORY_PRUNE_INTERVAL == 0 {
             self.prune_territory();
+        }
+    }
+
+    fn record_military_readiness(&mut self) {
+        if !self.community_military {
+            return;
+        }
+        let active_clans: HashMap<u32, i32> = self
+            .entities
+            .iter()
+            .filter(|entity| entity.is_active() && entity.clan >= 0)
+            .map(|entity| (entity.id, entity.clan))
+            .collect();
+        let mut counts: HashMap<i32, u64> = HashMap::new();
+        for loadout in &self.equipment {
+            if loadout.weapon.is_none() && loadout.armor.is_none() {
+                continue;
+            }
+            if let Some(&clan_id) = active_clans.get(&loadout.entity_id) {
+                *counts.entry(clan_id).or_default() += 1;
+            }
+        }
+        for (clan_id, count) in counts {
+            let state = self.ensure_military_index(clan_id);
+            self.militaries[state].record_equipped_member_ticks(count);
         }
     }
 
@@ -2053,6 +2311,7 @@ impl World {
                 let (road_access, available_wood) = self.logistics_signals(idx);
                 let (trade_relation, trade_partners, trade_volume) = self.trade_signals(idx);
                 let (settlement_development, technology) = self.settlement_signals(idx);
+                let (military_strength, ore_access) = self.military_signals(idx);
 
                 // The situation vector the master + sub-minds read. Normalised,
                 // information-rich, and free of behavioural prescriptions — what
@@ -2079,7 +2338,7 @@ impl World {
                     road_access,            // 16 roads / logistics access near home
                     settlement_development, // 17 buildings / settlement development level
                     technology,             // 18 tech / research level
-                    0.0,                    // 19 military strength / equipment level
+                    military_strength,      // 19 military strength / equipment level
                     if self.params.community_logistics {
                         (self.clans[idx].wood as f32 / (size * 3.0).max(1.0)).min(1.0)
                     } else {
@@ -2094,7 +2353,7 @@ impl World {
                     self.disaster_level,    // 27 active disaster/event severity
                     avg_health,             // 28 average member health
                     0.0,                    // 29 water / coast / river access of territory
-                    0.0,                    // 30 spare
+                    ore_access,             // 30 stored / reachable mineral access
                     1.0,                    // 31 bias
                 ];
 
@@ -2507,6 +2766,9 @@ impl World {
                 if self.handle_construction(e, cidx) {
                     return;
                 }
+                if self.handle_military_production(e, cidx) {
+                    return;
+                }
                 if let Some((tx, ty)) = self.clans[cidx].expand_target {
                     e.goal = Goal::Claiming;
                     self.move_toward(e, tx, ty, true);
@@ -2538,7 +2800,9 @@ impl World {
                 if self.handle_trade(e, cidx) {
                     return;
                 }
-                if self.should_gather_wood(e, cidx) {
+                if self.should_mine_ore(e, cidx) {
+                    self.mine_ore(e, cidx);
+                } else if self.should_gather_wood(e, cidx) {
                     self.gather_wood(e, cidx);
                 } else {
                     self.gather(e, cidx);
@@ -2707,6 +2971,127 @@ impl World {
             let state = self.ensure_settlement_index(clan_id);
             self.settlements[state].stats.shelter_healing_milli += healed;
         }
+    }
+
+    fn should_mine_ore(&self, entity: &Entity, clan_idx: usize) -> bool {
+        if !self.community_military
+            || self.active_workshop(self.clans[clan_idx].id).is_none()
+            || entity.hunger(self.params.starve_ticks.max(1)) >= EMERGENCY_HUNGER
+            || entity.food > 0
+            || entity.wood > 0
+            || entity.trade_target_clan >= 0
+        {
+            return false;
+        }
+        if ore_cargo_for(&self.ore_cargo, entity.id).is_some() {
+            return true;
+        }
+        if !self.military_safety_ready(clan_idx) {
+            return false;
+        }
+        let chosen = self
+            .military_index(entity.clan)
+            .and_then(|index| self.militaries[index].miner_entity_id);
+        if chosen != Some(entity.id) {
+            return false;
+        }
+        let stored = self
+            .military_index(entity.clan)
+            .map_or(0, |index| self.militaries[index].ore_stockpile.max(0));
+        stored < self.clan_roster_size(clan_idx) * MILITARY_ORE_TARGET_PER_MEMBER
+            && self
+                .nearest_ore_deposit(entity, self.params.home_range.max(1))
+                .is_some()
+    }
+
+    fn mine_ore(&mut self, entity: &mut Entity, clan_idx: usize) {
+        let carried = ore_cargo_for(&self.ore_cargo, entity.id).map_or(0, |cargo| cargo.ore);
+        let safety_ready = self.military_safety_ready(clan_idx)
+            && entity.hunger(self.params.starve_ticks.max(1)) < EMERGENCY_HUNGER;
+        let deposit = self.nearest_ore_deposit(entity, self.params.home_range.max(1));
+        if carried >= MAX_CARRIED_ORE || (carried > 0 && (deposit.is_none() || !safety_ready)) {
+            if let Some((sx, sy)) = self.clans[clan_idx].stockpile {
+                entity.goal = Goal::HaulingOre;
+                self.move_toward(entity, sx, sy, true);
+                if (entity.x, entity.y) == (sx, sy) {
+                    let delivered = take_entity_ore(&mut self.ore_cargo, entity.id, u16::MAX);
+                    let state = self.ensure_military_index(entity.clan);
+                    self.militaries[state].deliver_ore(delivered as i32);
+                }
+                return;
+            }
+        }
+        if !safety_ready {
+            let state = self.ensure_military_index(entity.clan);
+            self.militaries[state].record_unsafe_work_tick();
+            self.gather(entity, clan_idx);
+            return;
+        }
+        let Some(deposit_idx) = deposit else {
+            self.gather(entity, clan_idx);
+            return;
+        };
+        let (x, y) = self.ore_deposits[deposit_idx].position();
+        entity.goal = Goal::MiningOre;
+        self.move_toward(entity, x, y, true);
+        if (entity.x, entity.y) != (x, y) {
+            return;
+        }
+        let extracted = self.ore_deposits[deposit_idx].extract(1);
+        if extracted == 0 {
+            return;
+        }
+        let accepted = add_entity_ore(&mut self.ore_cargo, entity.id, extracted);
+        let state = self.ensure_military_index(entity.clan);
+        self.militaries[state].record_extraction(accepted);
+    }
+
+    fn handle_military_production(&mut self, entity: &mut Entity, clan_idx: usize) -> bool {
+        if !self.community_military
+            || !self.military_safety_ready(clan_idx)
+            || entity.hunger(self.params.starve_ticks.max(1)) >= EMERGENCY_HUNGER
+        {
+            return false;
+        }
+        let clan_id = self.clans[clan_idx].id;
+        let Some(workshop) = self.active_workshop(clan_id) else {
+            return false;
+        };
+        let tech = self.settlement_tech(clan_id).level;
+        let state_idx = self.ensure_military_index(clan_id);
+        let active_recipient = self.militaries[state_idx]
+            .project
+            .map(|project| project.recipient_entity_id);
+        if active_recipient != Some(entity.id) {
+            return false;
+        }
+
+        entity.goal = Goal::ForgingEquipment;
+        self.move_toward(entity, workshop.0, workshop.1, true);
+        if (entity.x - workshop.0)
+            .abs()
+            .max((entity.y - workshop.1).abs())
+            > 1
+        {
+            return true;
+        }
+
+        let work = if tech >= 2 { 2 } else { 1 };
+        if !self.military_safety_ready(clan_idx)
+            || entity.hunger(self.params.starve_ticks.max(1)) >= EMERGENCY_HUNGER
+        {
+            self.militaries[state_idx].record_unsafe_work_tick();
+            return false;
+        }
+        let advance = self.militaries[state_idx].add_production_work(work);
+        if let Some(produced) = advance.completed {
+            let replaced = assign_equipment(&mut self.equipment, produced);
+            self.militaries[state_idx].record_equipped();
+            if replaced.is_some() {
+                self.militaries[state_idx].record_equipment_lost(1);
+            }
+        }
+        true
     }
 
     fn should_gather_wood(&self, e: &Entity, cidx: usize) -> bool {
@@ -3366,7 +3751,19 @@ impl World {
             if attacker_clan >= 0 && victim_clan >= 0 {
                 self.diplomacy.adjust(attacker_clan, victim_clan, -0.04);
             }
-            let mut applied_damage = dmg;
+            let attacker_loadout = self
+                .community_military
+                .then(|| equipment_for(&self.equipment, self.entities[i].id).copied())
+                .flatten();
+            let defender_loadout = self
+                .community_military
+                .then(|| equipment_for(&self.equipment, self.entities[j].id).copied())
+                .flatten();
+            let weapon_bonus = attacker_loadout.map_or(0.0, |loadout| {
+                dmg * loadout.attack_bonus_milli() as f32 / 1000.0
+            });
+            let mut applied_damage = dmg + weapon_bonus;
+            let mut downstream_factor = 1.0;
             if self.community_settlement && victim_clan >= 0 {
                 let protected = self.buildings.iter().any(|building| {
                     building.clan_id == victim_clan
@@ -3378,12 +3775,27 @@ impl World {
                             <= WALL_DEFENSE_RADIUS
                 });
                 if protected {
-                    let prevented = dmg * WALL_DAMAGE_REDUCTION;
+                    let prevented = applied_damage * WALL_DAMAGE_REDUCTION;
                     applied_damage -= prevented;
+                    downstream_factor *= 1.0 - WALL_DAMAGE_REDUCTION;
                     let state = self.ensure_settlement_index(victim_clan);
                     self.settlements[state].stats.wall_damage_prevented_milli +=
                         (prevented * 1000.0).round() as u64;
                 }
+            }
+            if let Some(loadout) = defender_loadout {
+                let before = applied_damage;
+                applied_damage = loadout.protected_damage(applied_damage);
+                let prevented = before - applied_damage;
+                downstream_factor *= applied_damage / before.max(f32::EPSILON);
+                if prevented > 0.0 && victim_clan >= 0 {
+                    let state = self.ensure_military_index(victim_clan);
+                    self.militaries[state].record_damage_prevented(prevented);
+                }
+            }
+            if weapon_bonus > 0.0 && attacker_clan >= 0 {
+                let state = self.ensure_military_index(attacker_clan);
+                self.militaries[state].record_bonus_damage(weapon_bonus * downstream_factor);
             }
             self.entities[j].health -= applied_damage;
             if self.entities[j].health <= 0.0 {
@@ -3422,6 +3834,23 @@ impl World {
                 continue;
             }
             let cid = self.entities[i].clan;
+            let dead_id = self.entities[i].id;
+            remove_entity_ore_cargo(&mut self.ore_cargo, dead_id);
+            if let Some(loadout) = remove_entity_equipment(&mut self.equipment, dead_id) {
+                let lost = loadout.weapon.is_some() as u32 + loadout.armor.is_some() as u32;
+                if cid >= 0 {
+                    let state = self.ensure_military_index(cid);
+                    self.militaries[state].record_equipment_lost(lost);
+                }
+            }
+            if let Some(state) = self.military_index(cid) {
+                if self.militaries[state]
+                    .project
+                    .is_some_and(|project| project.recipient_entity_id == dead_id)
+                {
+                    self.militaries[state].project = None;
+                }
+            }
             if cid < 0 {
                 continue;
             }
@@ -3430,7 +3859,6 @@ impl World {
                 None => continue,
             };
             self.clans[ci].stats.losses += 1;
-            let dead_id = self.entities[i].id;
             if self.clans[ci].leader_id == dead_id {
                 let members = self.clans[ci].members.clone();
                 let mut successor = None;
@@ -3471,6 +3899,8 @@ impl World {
         }
         let members = std::mem::take(&mut self.clans[ci].members);
         for mid in members {
+            remove_entity_ore_cargo(&mut self.ore_cargo, mid);
+            remove_entity_equipment(&mut self.equipment, mid);
             if let Some(mi) = self.entity_index(mid) {
                 self.entities[mi].food += self.entities[mi].trade_food;
                 self.entities[mi].wood += self.entities[mi].trade_wood;
@@ -3490,6 +3920,7 @@ impl World {
         }
         self.buildings.retain(|building| building.clan_id != id);
         self.settlements.retain(|state| state.clan_id != id);
+        self.militaries.retain(|state| state.clan_id != id);
     }
 
     fn regrow_wood(&mut self) {
@@ -3562,6 +3993,100 @@ impl World {
             self.building_cells[self.grid.idx(x, y)] = id.0;
             self.buildings.push(Building::new(id, clan_id, x, y, kind));
             self.settlements[state_idx].build_target = Some(id);
+        }
+    }
+
+    fn plan_military_work(&mut self) {
+        if !self.community_military || self.tick % MILITARY_PLAN_INTERVAL != 0 {
+            return;
+        }
+        let clan_ids: Vec<i32> = self
+            .clans
+            .iter()
+            .filter(|clan| !clan.disbanded)
+            .map(|clan| clan.id)
+            .collect();
+        for clan_id in clan_ids {
+            let Some(clan_idx) = self.clan_index(clan_id) else {
+                continue;
+            };
+            let state_idx = self.ensure_military_index(clan_id);
+            let valid_miner = self.militaries[state_idx]
+                .miner_entity_id
+                .is_some_and(|id| {
+                    self.entities.iter().any(|entity| {
+                        entity.id == id
+                            && entity.clan == clan_id
+                            && entity.is_active()
+                            && !entity.is_leader
+                            && entity.work_role == ClanMode::Gather
+                    })
+                });
+            if !valid_miner {
+                self.militaries[state_idx].miner_entity_id = self
+                    .entities
+                    .iter()
+                    .filter(|entity| {
+                        entity.clan == clan_id
+                            && entity.is_active()
+                            && !entity.is_leader
+                            && entity.work_role == ClanMode::Gather
+                    })
+                    .map(|entity| entity.id)
+                    .min();
+            }
+
+            let project_valid = self.militaries[state_idx].project.is_some_and(|project| {
+                self.entities.iter().any(|entity| {
+                    entity.id == project.recipient_entity_id
+                        && entity.clan == clan_id
+                        && entity.is_active()
+                        && entity.work_role == ClanMode::Expand
+                })
+            });
+            if self.militaries[state_idx].project.is_some() && !project_valid {
+                self.militaries[state_idx].project = None;
+            }
+            if self.militaries[state_idx].project.is_some()
+                || !self.military_safety_ready(clan_idx)
+                || self.active_workshop(clan_id).is_none()
+                || self.settlements.iter().any(|state| {
+                    state.clan_id == clan_id
+                        && state.build_target.is_some_and(|id| {
+                            self.buildings.iter().any(|building| {
+                                building.id == id
+                                    && !building.is_complete()
+                                    && !building.is_destroyed()
+                            })
+                        })
+                })
+            {
+                continue;
+            }
+            let tech = self.settlement_tech(clan_id).level;
+            let candidate = self
+                .entities
+                .iter()
+                .filter(|entity| {
+                    entity.clan == clan_id
+                        && entity.is_active()
+                        && entity.work_role == ClanMode::Expand
+                        && self.desired_equipment(entity.id, tech).is_some()
+                })
+                .min_by_key(|entity| entity.id)
+                .map(|entity| entity.id);
+            let Some(entity_id) = candidate else {
+                continue;
+            };
+            let kind = self
+                .desired_equipment(entity_id, tech)
+                .expect("candidate needs equipment");
+            let spendable_wood = (self.clans[clan_idx].wood - MILITARY_WOOD_MARGIN).max(0);
+            if let Some(recipe) =
+                self.militaries[state_idx].begin_project(entity_id, kind, tech, spendable_wood)
+            {
+                self.clans[clan_idx].wood -= recipe.wood;
+            }
         }
     }
 
@@ -4417,6 +4942,274 @@ mod tests {
         let quality = crate::quality::score_clan(&world, clan_id);
         assert_eq!(quality.infrastructure, 0.0);
         assert_eq!(quality.technology, 0.0);
+    }
+
+    #[test]
+    fn military_pipeline_requires_physical_mining_delivery_and_forging() {
+        let mut world = settlement_test_world();
+        let clan_id = world.clans[0].id;
+        let home = world.clans[0].stockpile.unwrap();
+        let mut workshop = Building::new(
+            BuildingId(world.next_building_id),
+            clan_id,
+            home.0 + 1,
+            home.1,
+            BuildingKind::Workshop,
+        );
+        world.next_building_id += 1;
+        workshop.add_construction(workshop.kind.cost().work);
+        world.building_cells[world.grid.idx(workshop.x, workshop.y)] = workshop.id.0;
+        world.buildings.push(workshop);
+        let pop = world.clan_roster_size(0);
+        world.clans[0].food = pop * STOCKPILE_FOOD_PER_MEMBER;
+        world.clans[0].reserve_food = pop * RESERVE_FOOD_PER_MEMBER;
+        world.clans[0].wood = MILITARY_WOOD_MARGIN + EquipmentKind::Spear.recipe().wood;
+        let miner_id = {
+            let miner = world
+                .entities
+                .iter_mut()
+                .find(|entity| entity.clan == clan_id && !entity.is_leader)
+                .unwrap();
+            miner.work_role = ClanMode::Gather;
+            miner.id
+        };
+        world.plan_military_work();
+        assert_eq!(world.militaries[0].miner_entity_id, Some(miner_id));
+        let deposit_idx = world
+            .nearest_ore_deposit(world.entity_by_id(miner_id).unwrap(), world.grid.size)
+            .unwrap();
+        let deposit = world.ore_deposits[deposit_idx].position();
+
+        let miner_idx = world.entity_index(miner_id).unwrap();
+        let mut miner = world.entities.remove(miner_idx);
+        world.rebuild_occupancy(&world.entities.clone());
+        let before = world.ore_deposits[deposit_idx].remaining;
+        miner.x = world.grid.clamp(deposit.0 + 3);
+        miner.y = deposit.1;
+        miner.move_budget = 0.0;
+        world.mine_ore(&mut miner, 0);
+        assert_eq!(world.ore_deposits[deposit_idx].remaining, before);
+        miner.x = deposit.0;
+        miner.y = deposit.1;
+        for _ in 0..MAX_CARRIED_ORE {
+            world.mine_ore(&mut miner, 0);
+        }
+        assert_eq!(
+            ore_cargo_for(&world.ore_cargo, miner_id).unwrap().ore,
+            MAX_CARRIED_ORE
+        );
+        (miner.x, miner.y) = home;
+        world.mine_ore(&mut miner, 0);
+        assert!(ore_cargo_for(&world.ore_cargo, miner_id).is_none());
+        assert_eq!(world.militaries[0].ore_stockpile, MAX_CARRIED_ORE as i32);
+        world.entities.push(miner);
+        world.entities.sort_by_key(|entity| entity.id);
+
+        let smith_id = world
+            .entities
+            .iter_mut()
+            .find(|entity| entity.clan == clan_id && entity.id != miner_id)
+            .map(|entity| {
+                entity.work_role = ClanMode::Expand;
+                entity.id
+            })
+            .unwrap();
+        world.plan_military_work();
+        assert_eq!(
+            world.militaries[0].project.unwrap().recipient_entity_id,
+            smith_id
+        );
+        let smith_idx = world.entity_index(smith_id).unwrap();
+        let mut smith = world.entities.remove(smith_idx);
+        world.rebuild_occupancy(&world.entities.clone());
+        let forge = world.active_workshop(clan_id).unwrap();
+        smith.x = if forge.0 < world.grid.size / 2 {
+            world.grid.size - 1
+        } else {
+            0
+        };
+        smith.y = if forge.1 < world.grid.size / 2 {
+            world.grid.size - 1
+        } else {
+            0
+        };
+        smith.move_budget = 0.0;
+        assert!(world.handle_military_production(&mut smith, 0));
+        assert_eq!(world.militaries[0].stats.production_work, 0);
+        smith.x = home.0;
+        smith.y = home.1;
+        for _ in 0..EquipmentKind::Spear.recipe().work {
+            assert!(world.handle_military_production(&mut smith, 0));
+        }
+        assert_eq!(
+            equipment_for(&world.equipment, smith_id).unwrap().weapon,
+            Some(EquipmentKind::Spear)
+        );
+        assert_eq!(world.militaries[0].stats.equipment_completed, 1);
+    }
+
+    #[test]
+    fn military_ablation_zeros_signals_scoring_and_combat_effects() {
+        let mut world = settlement_test_world();
+        let clan_id = world.clans[0].id;
+        let entity_id = world
+            .entities
+            .iter()
+            .find(|entity| entity.clan == clan_id)
+            .unwrap()
+            .id;
+        assign_equipment(
+            &mut world.equipment,
+            crate::military::ProducedEquipment {
+                recipient_entity_id: entity_id,
+                kind: EquipmentKind::Spear,
+            },
+        );
+        let state = world.ensure_military_index(clan_id);
+        world.militaries[state].ore_stockpile = 12;
+        assert!(world.military_signals(0).0 > 0.0);
+        world.community_military = false;
+        assert_eq!(world.military_signals(0), (0.0, 0.0));
+        assert_eq!(crate::quality::score_clan(&world, clan_id).military, 0.0);
+    }
+
+    #[test]
+    fn military_equipment_applies_exact_combat_value_only_when_enabled() {
+        let (mut world, attacker, victim, attacker_clan, victim_clan) = trade_test_world();
+        world.params.community_trade = false;
+        world.params.community_care = false;
+        world.params.clan_grace_ticks = 0;
+        world.params.war_threshold = 0.0;
+        world.params.attack_damage = 4.0;
+        world.entities[attacker].x = 10;
+        world.entities[attacker].y = 10;
+        world.entities[attacker].work_role = ClanMode::Attack;
+        world.entities[attacker].attack_cooldown = 0;
+        world.entities[victim].x = 11;
+        world.entities[victim].y = 10;
+        assign_equipment(
+            &mut world.equipment,
+            crate::military::ProducedEquipment {
+                recipient_entity_id: world.entities[attacker].id,
+                kind: EquipmentKind::Spear,
+            },
+        );
+        assign_equipment(
+            &mut world.equipment,
+            crate::military::ProducedEquipment {
+                recipient_entity_id: world.entities[victim].id,
+                kind: EquipmentKind::Armor,
+            },
+        );
+        let victim_health = world.entities[victim].max_health;
+        world.entities[victim].health = victim_health;
+        world.resolve_combat();
+        assert!((victim_health - world.entities[victim].health - 3.75).abs() < 1e-5);
+        assert!(world.militaries[attacker_clan].stats.bonus_damage_milli > 0);
+        assert!(world.militaries[victim_clan].stats.damage_prevented_milli > 0);
+
+        world.community_military = false;
+        world.entities[attacker].attack_cooldown = 0;
+        world.entities[victim].health = victim_health;
+        world.resolve_combat();
+        assert!((victim_health - world.entities[victim].health - 4.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn military_food_gate_blocks_assignment_and_resource_spending() {
+        let mut world = settlement_test_world();
+        let clan_id = world.clans[0].id;
+        let home = world.clans[0].stockpile.unwrap();
+        let mut workshop = Building::new(
+            BuildingId(world.next_building_id),
+            clan_id,
+            home.0 + 1,
+            home.1,
+            BuildingKind::Workshop,
+        );
+        world.next_building_id += 1;
+        workshop.add_construction(workshop.kind.cost().work);
+        world.building_cells[world.grid.idx(workshop.x, workshop.y)] = workshop.id.0;
+        world.buildings.push(workshop);
+        world.clans[0].food = 0;
+        world.clans[0].reserve_food = 0;
+        world.clans[0].wood = 100;
+        let state = world.ensure_military_index(clan_id);
+        world.militaries[state].ore_stockpile = 100;
+        let before_wood = world.clans[0].wood;
+        world.plan_military_work();
+        assert!(world.militaries[state].project.is_none());
+        assert_eq!(world.clans[0].wood, before_wood);
+        let worker_id = world
+            .entities
+            .iter()
+            .find(|entity| entity.clan == clan_id && !entity.is_leader)
+            .unwrap()
+            .id;
+        let worker_idx = world.entity_index(worker_id).unwrap();
+        let mut worker = world.entities.remove(worker_idx);
+        world.rebuild_occupancy(&world.entities.clone());
+        let deposit_idx = world
+            .nearest_ore_deposit(&worker, world.grid.size)
+            .expect("bootstrap ore");
+        (worker.x, worker.y) = world.ore_deposits[deposit_idx].position();
+        let remaining = world.ore_deposits[deposit_idx].remaining;
+        world.mine_ore(&mut worker, 0);
+        assert_eq!(world.ore_deposits[deposit_idx].remaining, remaining);
+        assert_eq!(world.militaries[state].stats.unsafe_work_ticks, 1);
+
+        add_entity_ore(&mut world.ore_cargo, worker_id, 3);
+        worker.goal = Goal::Wander;
+        world.mine_ore(&mut worker, 0);
+        assert_eq!(worker.goal, Goal::HaulingOre);
+        assert_eq!(world.ore_deposits[deposit_idx].remaining, remaining);
+        (worker.x, worker.y) = home;
+        world.mine_ore(&mut worker, 0);
+        assert!(ore_cargo_for(&world.ore_cargo, worker_id).is_none());
+    }
+
+    #[test]
+    fn military_cleanup_removes_dead_and_disbanded_ownership_references() {
+        let mut world = settlement_test_world();
+        let clan_id = world.clans[0].id;
+        let member_id = world.clans[0].members[0];
+        add_entity_ore(&mut world.ore_cargo, member_id, 3);
+        assign_equipment(
+            &mut world.equipment,
+            crate::military::ProducedEquipment {
+                recipient_entity_id: member_id,
+                kind: EquipmentKind::Spear,
+            },
+        );
+        let state = world.ensure_military_index(clan_id);
+        world.militaries[state].miner_entity_id = Some(member_id);
+        world.militaries[state].project = Some(crate::military::EquipmentProject::new(
+            member_id,
+            EquipmentKind::Spear,
+        ));
+        let member = world.entity_index(member_id).unwrap();
+        world.entities[member].dead = true;
+        world.detach_dead();
+        assert!(ore_cargo_for(&world.ore_cargo, member_id).is_none());
+        assert!(equipment_for(&world.equipment, member_id).is_none());
+        assert!(world.militaries[state].project.is_none());
+
+        let survivor_id = world.clans[0].members[0];
+        add_entity_ore(&mut world.ore_cargo, survivor_id, 2);
+        assign_equipment(
+            &mut world.equipment,
+            crate::military::ProducedEquipment {
+                recipient_entity_id: survivor_id,
+                kind: EquipmentKind::Armor,
+            },
+        );
+        world.disband_clan(0);
+        assert!(ore_cargo_for(&world.ore_cargo, survivor_id).is_none());
+        assert!(equipment_for(&world.equipment, survivor_id).is_none());
+        assert!(world
+            .militaries
+            .iter()
+            .all(|state| state.clan_id != clan_id));
     }
 
     fn settlement_test_world() -> World {

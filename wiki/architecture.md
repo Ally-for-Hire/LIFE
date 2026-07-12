@@ -13,6 +13,7 @@ no JSON snapshot or HTTP layer like the old JS prototype had.
 | `world.rs` | `World` + `Params`: the grid, entities, trees, clans, the per-tick `step`, and all gameplay rules. |
 | `world/persistence.rs` | Versioned `LIFEWRLD` DTOs and migration, validation, checksum envelope, atomic replacement, and deterministic continuation tests. |
 | `settlement.rs` | Deterministic building, cost, technology, development, and settlement-stat data contracts. |
+| `military.rs` | Deterministic deposits, carried ore, recipes/projects, physical equipment ownership, and military counters. |
 | `entity.rs` | `Entity` (one NPC) and its `Goal` (the "idea" shown in the inspector). |
 | `clan.rs` | `Clan`, `ClanMode`, clan stats, and the clan color helper. |
 | `diplomacy.rs` | Deterministic sorted relationship ledger: trust, temporary pacts, delivered volume, and decay/pruning. |
@@ -42,7 +43,9 @@ enforces **one NPC per tile**, a reusable flood-fill buffer for territory
 pruning, and an O(1) running `pellet_total`. Settlement data stays at World level:
 `buildings` owns stable sites, `building_cells` is a one-cell footprint lookup,
 `settlements` is sorted per-clan tech/project/stat state, and
-`community_settlement` is the live treatment switch.
+`community_settlement` is the live treatment switch. Military state is also
+World-level so frozen V1/V2 nested DTOs stay decodable: stable deposits, sorted
+entity cargo/loadouts, sorted clan production state, and `community_military`.
 
 Entities and clans are plain `Vec`s; the dead are removed with in-place
 `retain`/swap-remove instead of per-tick reallocation.
@@ -63,10 +66,10 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
    22–24 expose relation, partner count, and delivered volume. Inputs 17–18 expose
    settlement development and technology. Food-secure clans may reserve wood for
    a new physical construction site at this cadence.
-4. **plan settlement projects**, **prepare rescues**, **rebuild occupancy**, then **update each entity**
+4. **plan settlement and military work**, **prepare rescues**, **rebuild occupancy**, then **update each entity**
    (hunger first; assigned care response next; then its ordinary community role,
    movement, delivery, road work, physical Expand construction, or physical Scout
-   workshop research). **advance rescues** physically carries patients toward the
+   workshop research, ore mining/hauling, or adjacent workshop forging). **advance rescues** physically carries patients toward the
    clan stockpile.
 5. **recruitment** (deliberate only), **combat** (trespasser / on-campaign / war),
    **raiding** (stockpile theft), **detach the dead** (losses, succession,
@@ -103,7 +106,10 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
   including exact xoshiro state and cached decisions. Only `reach` and `occupied`
   scratch buffers are omitted and rebuilt. V2 adds buildings, the one-cell
   footprint layer, clan technology/stats, and the settlement ablation; V1 loads
-  migrate explicitly to empty enabled settlement state.
+  migrate explicitly to empty enabled settlement state. V3 wraps frozen V2 with
+  deposits, cargo, equipment, production/counters, and the military ablation;
+  V1/V2 migrate to enabled military with deterministically regenerated reachable
+  deposits and empty cargo/production/ownership state.
 - `community_logistics=false` is a deterministic infrastructure ablation. Wood
   regrowth still consumes the same per-forest RNG draws but does not mutate the
   layer, preventing avoidable RNG drift from the regrowth branch. Later divergence
@@ -121,6 +127,20 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
   planning, construction, research, and every building effect while retaining the
   structural treatment state for a clean live counterfactual. Excess reserve food
   above the non-granary cap is discarded on a mid-world toggle.
+- `community_military=false` keeps inputs 19/30 at zero and disables mining,
+  hauling, forging, readiness scoring, weapon bonuses, armor protection, and
+  military counters while retaining valid deposits, projects, and ownership.
+
+## Military validation counters
+
+Clan military state records extracted/delivered ore, adjacent forge work, completed
+and equipped items, equipped-member ticks, unsafe work, bonus damage, prevented
+damage, and loss cleanup. The paired gate requires the same tracked clan to deliver
+ore, complete production, and own equipment while preserving survival, food
+security, mean/worst clan fairness, and incumbent supply/ownership.
+Historical logistics, care, trade, and settlement paired tests explicitly disable
+the newer military layer so their established contracts remain comparable; the
+military pair is the integrated gate with every earlier layer enabled.
 
 ## Settlement validation counters
 
@@ -151,6 +171,6 @@ accounting when the peaceful tracked champion creates no natural opportunities.
 ## Rendering
 
 Each frame the world is painted into a `Color32` pixel buffer (terrain base →
-territory tint → wood/roads → pellets → trees → buildings → stockpiles → entities), uploaded as a
+territory tint → wood/roads → ore/pellets → trees → buildings → stockpiles → equipped entities), uploaded as a
 NEAREST-filtered texture, and drawn into the viewport with pan/zoom. One cell =
 one texel.

@@ -66,10 +66,14 @@ promotion gate require construction, causal public-good value, survival, food
 security, and clan fairness. `LIFEWRLD` V2 persists the complete settlement state
 and explicitly migrates V1 worlds.
 
-## Next (civ layers)
+## Resource-backed military equipment V1
 
-- **Weapons / military** — equipment from resources + tech that boosts
-  attack/defense; brains learn to arm before war.
+Deterministic finite ore, survival-gated physical mining/hauling, workshop forge
+projects, entity-owned spears/swords/armor, exact combat effects, ablation,
+promotion gates, UI, and `LIFEWRLD` V3 persistence are implemented and verified.
+
+All planned civilization-layer milestones through Military Equipment V1 are now
+complete. Further work belongs in a new roadmap cycle rather than this milestone set.
 
 ## Engineering notes
 

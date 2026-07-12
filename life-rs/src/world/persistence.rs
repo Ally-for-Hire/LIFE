@@ -11,6 +11,9 @@ use crate::clan::Clan;
 use crate::diplomacy::DiplomacyLedger;
 use crate::entity::Entity;
 use crate::grid::{terrain, Grid, NO_OWNER};
+use crate::military::{
+    ClanMilitary, EntityEquipment, EntityOreCargo, OreDeposit, MAX_CARRIED_ORE, MAX_ORE_PER_DEPOSIT,
+};
 use crate::rng::Rng;
 use crate::settlement::{Building, ClanSettlement, MAX_TECH_LEVEL};
 use bincode::Options;
@@ -23,6 +26,7 @@ use std::path::{Path, PathBuf};
 const MAGIC: &[u8; 8] = b"LIFEWRLD";
 const VERSION_V1: u16 = 1;
 const VERSION_V2: u16 = 2;
+const VERSION_V3: u16 = 3;
 const HEADER_LEN: usize = 24;
 const MAX_PAYLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_GRID_SIZE: i32 = 4096;
@@ -59,15 +63,26 @@ struct WorldSnapshotV2 {
     next_building_id: u32,
 }
 
+#[derive(Serialize, Deserialize)]
+struct WorldSnapshotV3 {
+    base: WorldSnapshotV2,
+    ore_deposits: Vec<OreDeposit>,
+    ore_cargo: Vec<EntityOreCargo>,
+    equipment: Vec<EntityEquipment>,
+    militaries: Vec<ClanMilitary>,
+    community_military: bool,
+    next_ore_deposit_id: u32,
+}
+
 impl World {
     /// Atomically writes a validated, versioned snapshot of every persistent
     /// world field. Scratch flood-fill and occupancy buffers are rebuilt after
     /// load and intentionally do not appear in the wire format.
     pub fn save_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
-        let snapshot = WorldSnapshotV2::capture(self);
+        let snapshot = WorldSnapshotV3::capture(self);
         snapshot.validate()?;
         let payload = encode_snapshot(&snapshot)?;
-        write_envelope(path.as_ref(), VERSION_V2, &payload)
+        write_envelope(path.as_ref(), VERSION_V3, &payload)
     }
 
     /// Loads and validates a full-world snapshot. The returned world owns the
@@ -82,6 +97,11 @@ impl World {
             }
             VERSION_V2 => {
                 let snapshot: WorldSnapshotV2 = decode_snapshot(&payload, "V2")?;
+                snapshot.validate()?;
+                Ok(snapshot.restore())
+            }
+            VERSION_V3 => {
+                let snapshot: WorldSnapshotV3 = decode_snapshot(&payload, "V3")?;
                 snapshot.validate()?;
                 Ok(snapshot.restore())
             }
@@ -116,7 +136,7 @@ impl WorldSnapshotV1 {
 
     fn restore(self) -> World {
         let cell_count = self.grid.terrain.len();
-        World {
+        let mut world = World {
             grid: self.grid,
             tick: self.tick,
             entities: self.entities,
@@ -129,9 +149,15 @@ impl WorldSnapshotV1 {
             building_cells: vec![0; cell_count],
             settlements: Vec::new(),
             community_settlement: true,
+            ore_deposits: Vec::new(),
+            ore_cargo: Vec::new(),
+            militaries: Vec::new(),
+            equipment: Vec::new(),
+            community_military: true,
             next_entity_id: self.next_entity_id,
             next_clan_id: self.next_clan_id,
             next_building_id: 1,
+            next_ore_deposit_id: 1,
             pellet_total: self.pellet_total as usize,
             deaths_starved: self.deaths_starved,
             deaths_combat: self.deaths_combat,
@@ -142,7 +168,9 @@ impl WorldSnapshotV1 {
             disaster_level: self.disaster_level,
             reach: Vec::new(),
             occupied: Vec::new(),
-        }
+        };
+        world.initialize_military_resources();
+        world
     }
 
     fn validate(&self) -> io::Result<()> {
@@ -403,6 +431,7 @@ impl WorldSnapshotV2 {
         world.settlements = self.settlements;
         world.community_settlement = self.community_settlement;
         world.next_building_id = self.next_building_id;
+        world.initialize_military_resources();
         world
     }
 
@@ -483,6 +512,123 @@ impl WorldSnapshotV2 {
             .any(|building| !targeted_buildings.contains(&building.id.0))
         {
             return Err(invalid("incomplete building has no active clan project"));
+        }
+        Ok(())
+    }
+}
+
+impl WorldSnapshotV3 {
+    fn capture(world: &World) -> Self {
+        Self {
+            base: WorldSnapshotV2::capture(world),
+            ore_deposits: world.ore_deposits.clone(),
+            ore_cargo: world.ore_cargo.clone(),
+            equipment: world.equipment.clone(),
+            militaries: world.militaries.clone(),
+            community_military: world.community_military,
+            next_ore_deposit_id: world.next_ore_deposit_id,
+        }
+    }
+
+    fn restore(self) -> World {
+        let mut world = self.base.restore();
+        world.ore_deposits = self.ore_deposits;
+        world.ore_cargo = self.ore_cargo;
+        world.equipment = self.equipment;
+        world.militaries = self.militaries;
+        world.community_military = self.community_military;
+        world.next_ore_deposit_id = self.next_ore_deposit_id;
+        world
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        self.base.validate()?;
+        let entity_clans: HashMap<u32, i32> = self
+            .base
+            .base
+            .entities
+            .iter()
+            .filter(|entity| !entity.dead)
+            .map(|entity| (entity.id, entity.clan))
+            .collect();
+        let clan_ids: HashSet<i32> = self
+            .base
+            .base
+            .clans
+            .iter()
+            .filter(|clan| !clan.disbanded)
+            .map(|clan| clan.id)
+            .collect();
+
+        let mut previous_deposit = 0;
+        let mut positions = HashSet::new();
+        for deposit in &self.ore_deposits {
+            if deposit.id.0 == 0
+                || deposit.id.0 <= previous_deposit
+                || deposit.id.0 >= self.next_ore_deposit_id
+                || deposit.remaining > MAX_ORE_PER_DEPOSIT
+                || !point_in_bounds(deposit.position(), self.base.base.grid.size)
+                || !positions.insert(deposit.position())
+            {
+                return Err(invalid("invalid ore deposit state"));
+            }
+            previous_deposit = deposit.id.0;
+        }
+        if self.next_ore_deposit_id == 0 {
+            return Err(invalid("invalid next ore deposit id"));
+        }
+
+        let mut previous_entity = 0;
+        for cargo in &self.ore_cargo {
+            if cargo.entity_id == 0
+                || cargo.entity_id <= previous_entity
+                || cargo.ore == 0
+                || cargo.ore > MAX_CARRIED_ORE
+                || !entity_clans.contains_key(&cargo.entity_id)
+            {
+                return Err(invalid("invalid entity ore cargo"));
+            }
+            previous_entity = cargo.entity_id;
+        }
+
+        previous_entity = 0;
+        for loadout in &self.equipment {
+            if loadout.entity_id == 0
+                || loadout.entity_id <= previous_entity
+                || !loadout.is_valid()
+                || loadout.weapon.is_none() && loadout.armor.is_none()
+                || !entity_clans.contains_key(&loadout.entity_id)
+            {
+                return Err(invalid("invalid entity equipment"));
+            }
+            previous_entity = loadout.entity_id;
+        }
+
+        let tech_level = |clan_id| {
+            self.base
+                .settlements
+                .iter()
+                .find(|state| state.clan_id == clan_id)
+                .map_or(0, |state| state.tech.level)
+        };
+        let mut previous_clan = 0;
+        for state in &self.militaries {
+            if state.clan_id <= previous_clan
+                || !clan_ids.contains(&state.clan_id)
+                || state.ore_stockpile < 0
+                || state
+                    .miner_entity_id
+                    .is_some_and(|entity_id| entity_clans.get(&entity_id) != Some(&state.clan_id))
+                || state.project.is_some_and(|project| {
+                    project.recipient_entity_id == 0
+                        || project.work >= project.kind.recipe().work
+                        || tech_level(state.clan_id) < project.kind.recipe().unlock_tech
+                        || entity_clans.get(&project.recipient_entity_id) != Some(&state.clan_id)
+                })
+            {
+                return Err(invalid("invalid clan military state"));
+            }
+            previous_clan = state.clan_id;
         }
         Ok(())
     }
@@ -792,7 +938,7 @@ mod tests {
 
         representative_world().save_file(&path).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
-        bytes[8..10].copy_from_slice(&3u16.to_le_bytes());
+        bytes[8..10].copy_from_slice(&4u16.to_le_bytes());
         std::fs::write(&path, &bytes).unwrap();
         let error = World::load_file(&path).err().unwrap();
         assert!(error.to_string().contains("unsupported world version"));
@@ -863,6 +1009,90 @@ mod tests {
         assert!(loaded.settlements.is_empty());
         assert!(loaded.building_cells.iter().all(|&id| id == 0));
         assert_eq!(loaded.next_building_id, 1);
+        assert!(loaded.community_military);
+        assert!(!loaded.ore_deposits.is_empty());
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v2_world_migrates_to_enabled_military_with_reachable_deposits() {
+        let path = test_path("v2-migration");
+        let original = representative_world();
+        let snapshot = WorldSnapshotV2::capture(&original);
+        write_envelope(&path, VERSION_V2, &encode_snapshot(&snapshot).unwrap()).unwrap();
+
+        let loaded = World::load_file(&path).unwrap();
+
+        assert!(loaded.community_military);
+        assert!(!loaded.ore_deposits.is_empty());
+        for clan in &loaded.clans {
+            let home = clan.stockpile.unwrap();
+            assert!(loaded.ore_deposits.iter().any(|deposit| {
+                !deposit.is_depleted()
+                    && (deposit.x - home.0).abs().max((deposit.y - home.1).abs()) <= 10
+                    && !loaded.is_foreign_tile(deposit.x, deposit.y, clan.id)
+            }));
+        }
+        assert!(loaded.ore_cargo.is_empty());
+        assert!(loaded.equipment.is_empty());
+        assert!(loaded.militaries.is_empty());
+        assert!(loaded.next_ore_deposit_id > 1);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v3_roundtrip_preserves_active_cargo_project_and_equipment() {
+        let path = test_path("v3-military");
+        let mut world = representative_world();
+        let clan_id = world.clans[0].id;
+        let entity_id = world
+            .entities
+            .iter()
+            .find(|entity| entity.clan == clan_id)
+            .unwrap()
+            .id;
+        crate::military::add_entity_ore(&mut world.ore_cargo, entity_id, 3);
+        crate::military::assign_equipment(
+            &mut world.equipment,
+            crate::military::ProducedEquipment {
+                recipient_entity_id: entity_id,
+                kind: crate::military::EquipmentKind::Spear,
+            },
+        );
+        let mut military = crate::military::ClanMilitary::new(clan_id);
+        military.ore_stockpile = 9;
+        military.miner_entity_id = Some(entity_id);
+        military.project = Some(crate::military::EquipmentProject {
+            recipient_entity_id: entity_id,
+            kind: crate::military::EquipmentKind::Spear,
+            work: 7,
+        });
+        military.stats.ore_delivered = 12;
+        military.stats.equipped_member_ticks = 40;
+        world.militaries = vec![military];
+
+        world.save_file(&path).unwrap();
+        let loaded = World::load_file(&path).unwrap();
+
+        assert_eq!(persistent_bytes(&world), persistent_bytes(&loaded));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn malformed_v3_military_references_are_rejected() {
+        let path = test_path("v3-invalid-military");
+        let world = representative_world();
+        let mut snapshot = WorldSnapshotV3::capture(&world);
+        snapshot.ore_cargo = vec![crate::military::EntityOreCargo {
+            entity_id: snapshot.base.base.next_entity_id + 10,
+            ore: 1,
+        }];
+        write_envelope(&path, VERSION_V3, &encode_snapshot(&snapshot).unwrap()).unwrap();
+        assert!(World::load_file(&path)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("invalid entity ore cargo"));
         cleanup(&path);
     }
 
@@ -990,7 +1220,7 @@ mod tests {
     }
 
     fn persistent_bytes(world: &World) -> Vec<u8> {
-        encode_snapshot(&WorldSnapshotV2::capture(world)).unwrap()
+        encode_snapshot(&WorldSnapshotV3::capture(world)).unwrap()
     }
 
     fn test_path(label: &str) -> PathBuf {

@@ -79,6 +79,10 @@ cargo run --release        # first release build takes a few minutes, then it's 
   one-cell physical construction sites. Expand workers build houses, granaries,
   workshops, markets, and walls; Scout leaders research at completed workshops,
   unlocking stronger civic options without changing the fixed `LFB1` brain shape.
+- **Military Equipment V1:** deterministic mineral deposits feed a physical
+  ore-to-equipment chain. One food-secure Gather miner hauls ore; an Expand smith
+  works beside a workshop and personally receives the spear, sword, or armor it
+  finishes. The live ablation makes retained equipment completely inert.
 - **Combat**, **food-gated reproduction**, **food memory**, and **one NPC per
   tile**.
 - Game-like **toggleable panels**, an **NPC inspector** (its current "idea"),
@@ -92,8 +96,8 @@ cargo run --release        # first release build takes a few minutes, then it's 
 - **Viewport:** drag to pan, scroll to zoom, click an NPC to inspect it.
 - **Controls panel:** save/load a complete world, presets, populate counts, and every tunable world
   parameter (food/trees, hunger/health, movement/perception, clans/combat,
-  growth/expansion, Community Logistics/Care/Trade and Buildings/Technology
-  ablations, terrain).
+  growth/expansion, Community Logistics/Care/Trade, Buildings/Technology, and
+  Military Equipment ablations, terrain).
 - **Training window:** start/stop evolution, edit the training config, watch the
   fitness graph, and seed the best brain into the live world.
 
@@ -109,6 +113,7 @@ cargo test --release champion_promotion -- --nocapture
 cargo test --release tracked_champion_care_preserves_survival_gates -- --nocapture
 cargo test --release tracked_champion_trade_preserves_survival_gates -- --nocapture
 cargo test --release tracked_champion_settlement_preserves_survival_gates -- --nocapture
+cargo test --release tracked_champion_military_completes_safe_physical_pipeline -- --nocapture
 cargo test --release world::persistence::tests -- --nocapture
 ```
 
@@ -139,6 +144,12 @@ Natural tracked runs did not assign Scout leaders to workshop research, so the
 deterministic physical-workshop unit test proves research progression separately;
 the release benchmark does not claim unobserved natural technology gain.
 
+Military Equipment's 13-world pair preserves **1.000** clan survival, food
+security **0.931 / 0.935**, and enabled fairness **+0.002**. Enabled worlds deliver
+**15.4 ore**, complete **2.9 items**, accumulate about **4,070 equipped-member
+ticks**, and finish the full physical pipeline in **38%** of worlds; the disabled
+arm performs no military work.
+
 Current tracked-champion result across 13 paired worlds: initial-clan survival
 **1.000 / 1.000** (enabled/disabled), food security **0.935 / 0.910**, hauling
 throughput **0.663 / 0.563**, road utility **0.253 / 0**, and enabled fairness
@@ -148,8 +159,9 @@ currently improves rather than spends that margin.
 `life-rs/champion.bin` is the tracked deployable model. Marathon logs, stage/gen
 snapshots, backup champions, and `target/` are generated locally and git-ignored.
 `world.lifeworld` is the separate full simulation snapshot. V2 adds settlement
-sites, technology, counters, and ablation state while explicitly migrating V1
-files to an empty enabled settlement layer. Loading pauses the
+state; V3 adds deposits, carried ore, forge projects, equipment ownership, military
+counters, and the ablation. V1/V2 migrate explicitly without reinterpreting old
+bytes. Loading pauses the
 world and detaches trainer-champion auto-sync until the user re-enables it.
 
 ## Documentation

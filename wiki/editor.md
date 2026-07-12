@@ -21,7 +21,8 @@ shape the layout like a game HUD.
   yellow cells are stockpiles, and leaders are lightened. During the logistics
   ablation, retained roads turn gray because they provide no movement benefit.
   Houses are blue, granaries gold, workshops purple, markets teal, and walls gray;
-  incomplete sites brighten as physical construction advances.
+  incomplete sites brighten as physical construction advances. Blue-gray cells are
+  finite mineral deposits; equipped entities receive a pale steel tint.
 
 ## Controls panel (left)
 
@@ -40,7 +41,8 @@ shape the layout like a game HUD.
   **Trade and diplomacy** independently toggles pacts, physical exchange, allied
   passage, and route defense versus the no-trade control. **Buildings and
   technology** independently toggles planning, physical work, research, signals,
-  and all building effects. **reset**
+  and all building effects. **Military equipment** independently toggles mining,
+  forging, signals, scoring, and weapon/armor effects while retaining visible state. **reset**
   restores defaults; your tuning survives Populate. See
   [Parameters](save-format.md).
 - **View:** reset the camera; a legend of NPC/terrain colors.
@@ -55,7 +57,8 @@ shape the layout like a game HUD.
   movement-cost savings, care incapacitations/rescues/bleed-outs, current trade
   partner/trust, physical cargo, delivered food/wood totals, active building
   counts, technology/research, current construction project and development
-  counters, plus the
+  counters, carried ore, weapon/armor, clan ore, active forge progress, armed
+  count, and military causal counters, plus the
   **master → sub-mind routing** (which
   expert the leader is delegating to), and the **blended action utilities**.
 - A live **clan list** (color, mode, people, food/reserve, wood, roads, K/L).
@@ -71,7 +74,7 @@ Rolling plots of **population & leaders & clans**, **food on the map**, and
 - **Stats:** generation, best/avg/best-ever fitness, robust survival, food and
   reserve security, community logistics, **hauling throughput**, **road utility**,
   task coverage, community care, delivered trade, settlement infrastructure and
-  technology, routing/archive health, and last-generation time.
+  technology, military readiness, routing/archive health, and last-generation time.
 - **Config:** population, episode ticks, clans per arena, repeats, arena size,
   arena trees/neutrals, mutation rate & strength, elite count.
 - **Seed best brain → live world:** inject the current champion as a new clan so

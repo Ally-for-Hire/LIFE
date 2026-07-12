@@ -26,6 +26,9 @@ pub enum Goal {
     Claiming,
     Constructing,
     Researching,
+    MiningOre,
+    HaulingOre,
+    ForgingEquipment,
 }
 
 impl Goal {
@@ -50,6 +53,9 @@ impl Goal {
             Goal::Claiming => "claiming land",
             Goal::Constructing => "constructing a building",
             Goal::Researching => "researching technology",
+            Goal::MiningOre => "mining ore",
+            Goal::HaulingOre => "hauling ore",
+            Goal::ForgingEquipment => "forging equipment",
         }
     }
 }

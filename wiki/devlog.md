@@ -382,10 +382,35 @@ persistence tests cover active construction/research, malformed settlement state
 and previous deterministic-continuation guarantees. The integrated release suite
 passes 75 tests with one ignored marathon.
 
+### A22 — Resource-backed Military Equipment V1
+
+Military readiness now begins with deterministic finite deposits rather than a
+combat toggle. A pre-tick planner selects one stable non-leader Gather miner and
+one stable Expand smith only after ordinary and reserve food floors are full. Ore
+is extracted on-cell, carried in a V1/V2-safe World-level record, delivered only
+at the stockpile, reserved with safe wood, then converted by the same recipient
+performing every production tick adjacent to a completed Workshop. Tech-0 spears
+keep the tracked champion feasible; tech 1/2 unlock swords and armor.
+
+Inputs 19/30 expose equipped strength and mineral access without changing `LFB1`.
+The live ablation retains valid state but zeros signals/scoring and disables every
+pipeline/combat effect. Weapons multiply base damage before walls; armor reduces
+post-wall damage, with actual marginal damage recorded. Death/disband cleanup
+removes cargo, loadouts, and projects. `LIFEWRLD` V3 wraps frozen V2 and explicitly
+migrates V1/V2 by regenerating deterministic reachable deposits with empty
+cargo/production/ownership state.
+
+The tracked 13-world pair preserves 1.000 clan survival, 0.931/0.935 food security,
+and +0.002 enabled fairness. Enabled worlds average 15.4 ore delivered, 46.8 forge
+work, 2.9 completed items, 4,070 equipped-member ticks, and 38% same-clan full
+pipeline completion; the disabled arm records zero. Promotion rejects unsafe work,
+hollow pipelines, and incumbent supply/production/ownership loss. The integrated
+release suite passes 96 tests with one ignored marathon.
+
 ## Open ideas / next
 
-- **Resource-backed military equipment:** add extractable material, production,
-  equipment ownership, and survival-gated promotion without changing `LFB1`.
+- **Next roadmap cycle:** all requested civilization milestones through Military
+  Equipment V1 are complete; choose the next evidence-backed layer separately.
 - **More sub-minds / deeper hierarchy:** specialist nets for diplomacy, logistics;
   a meta-gate over gates.
 - **Live-world continuous evolution without violence:** cultural imitation so

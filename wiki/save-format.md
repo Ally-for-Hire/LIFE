@@ -131,6 +131,15 @@ House 12 wood/24 work, Granary 18/36, Workshop 24/48, Market 30/60, and Wall
 for levels 1/2/3. Inputs 17–18 carry normalized development and technology; the
 fixed brain and champion formats do not change.
 
+Military Equipment uses a World-level `community_military` switch. One stable
+non-leader Gather miner carries at most eight ore; a stable Expand recipient must
+perform every production tick adjacent to a completed Workshop. Both stages require
+four members, ordinary food of four/member, full reserve of four/member, and a
+personally non-hungry worker. Recipes are Spear (tech 0, 2 ore/4 wood/16 work),
+Sword (tech 1, 5/2/24), and Armor (tech 2, 8/2/36). Spear/Sword add 25%/45%
+outgoing base damage and Armor prevents 25% incoming damage. Input 19 is equipped
+strength; input 30 is stored/reachable ore. The `LFB1` dimensions remain fixed.
+
 ## Terrain (applies on Populate)
 
 | Parameter | Default | Meaning |
@@ -183,3 +192,11 @@ out-of-bounds sites, invalid construction/HP, bad tech/research values, unsorted
 settlement records, project references that are not live incomplete buildings
 owned by the same clan, and orphaned incomplete sites without exactly one active
 clan project.
+
+V3 wraps the frozen V2 DTO and adds stable deposits, sorted entity ore cargo,
+sorted physical loadouts, sorted clan miner/project/counter state, the military
+ablation, and next deposit id. V1/V2 loads explicitly regenerate deterministic
+reachable deposits and initialize empty enabled cargo/production/ownership state.
+Validation rejects duplicate/out-of-order deposits, bad positions/
+amounts/next ids, unsorted or orphaned cargo/loadouts, empty/invalid equipment,
+negative clan ore, and miner/project recipients outside the owning live clan.
