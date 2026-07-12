@@ -68,6 +68,10 @@ cargo run --release        # first release build takes a few minutes, then it's 
   rescue window. Nearby Gather/Defend workers abandon routine jobs, reach the
   casualty, physically carry them home, and restore them; untreated wounds bleed
   out with ordinary death, kill, loss, and loot accounting.
+- **Trade/Diplomacy V1:** deterministic symmetric relationship memory creates
+  temporary trade pacts and allied passage. Gather couriers physically deliver
+  only need-directed food/wood above survival floors, repeated delivery builds trust, and
+  Defend workers respond to threats near active stockpile routes.
 - **Combat**, **food-gated reproduction**, **food memory**, and **one NPC per
   tile**.
 - Game-like **toggleable panels**, an **NPC inspector** (its current "idea"),
@@ -81,7 +85,7 @@ cargo run --release        # first release build takes a few minutes, then it's 
 - **Viewport:** drag to pan, scroll to zoom, click an NPC to inspect it.
 - **Controls panel:** presets, populate counts, and every tunable world
   parameter (food/trees, hunger/health, movement/perception, clans/combat,
-  growth/expansion, Community Logistics and Community Care ablations, terrain).
+  growth/expansion, Community Logistics/Care/Trade ablations, terrain).
 - **Training window:** start/stop evolution, edit the training config, watch the
   fitness graph, and seed the best brain into the live world.
 
@@ -95,6 +99,7 @@ cargo test --release logistics_ablation_is_deterministic -- --nocapture
 cargo test --release tracked_champion_logistics_preserves_survival_gates -- --nocapture
 cargo test --release champion_promotion -- --nocapture
 cargo test --release tracked_champion_care_preserves_survival_gates -- --nocapture
+cargo test --release tracked_champion_trade_preserves_survival_gates -- --nocapture
 ```
 
 The V1.1 tests run paired logistics-on/off worlds with the same brain, seeds, and
@@ -111,10 +116,16 @@ and **+0.009** clan fairness; it produced no clan-member wound opportunities in
 the natural 13-world sample, so deterministic forced-combat tests provide the
 causal rescue proof without claiming an unobserved natural-play gain.
 
+Trade's 13-world paired result preserves **1.000** robust and cohort survival,
+food security **0.932 / 0.936** (enabled/disabled), and enabled fairness **+0.010**.
+The treatment delivers **6.3 food + 3.8 wood** across **5.8 physical trips** per
+world while the disabled control delivers none; positive delivery is a hard gate.
+
 Current tracked-champion result across 13 paired worlds: initial-clan survival
-**1.000 / 1.000** (enabled/disabled), food security **0.928 / 0.935**, hauling
-throughput **0.438 / 0.372**, road utility **0.290 / 0**, and enabled fairness
-**+0.009**. The small security cost is bounded by a strict one-point tolerance.
+**1.000 / 1.000** (enabled/disabled), food security **0.935 / 0.910**, hauling
+throughput **0.663 / 0.563**, road utility **0.253 / 0**, and enabled fairness
+**+0.020**. The strict security gate remains in force; the integrated treatment
+currently improves rather than spends that margin.
 
 `life-rs/champion.bin` is the tracked deployable model. Marathon logs, stage/gen
 snapshots, backup champions, and `target/` are generated locally and git-ignored.

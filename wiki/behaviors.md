@@ -137,6 +137,28 @@ loss, and loot credit. The disabled arm keeps immediate-death behavior for causa
 comparison. Care quality is completed rescues divided by incapacitations, so
 creating more injuries cannot improve the score by itself.
 
+## Trade & Diplomacy V1
+
+Every 120 ticks, clans deterministically select the nearest non-hostile settlement
+within 60 cells, breaking equal-distance ties by clan id. Gather workers at home
+load at most two food and one wood into dedicated cargo only when the donor is
+richer than the recipient and remains above eight food per roster member plus six
+wood. Couriers walk to the partner stockpile and transfer ownership only on
+arrival, then physically return home. Only the active invited courier receives
+pre-alliance passage; it does not create global peace. Offers, loading, empty
+trips, and reciprocal shuffling do not count as useful trade evidence.
+
+Relationship memory is symmetric and stored in stable pair order. Completed
+delivery increases trust; after at least nine delivered material, repeated aid
+creates a temporary pact. Trust and recent volume decay, hostile attacks/raids
+decrease trust, and dead-clan relationships are pruned. An active pact or trust
+of at least 0.15 grants non-aggression and allied passage, but despotic harvest
+exclusion still prevents allies from taking each other's farm food. Defend workers
+cache a hostile entity id near the stockpile route and revalidate that exact
+attacker before engaging, so stale coordinates cannot endanger passers. Inputs 22–24 now
+report partner relation, partner count, and recent delivered volume without
+changing the `LFB1` brain dimensions.
+
 If a leader dies a follower is promoted; a clan disbands only when no members
 remain (its territory is then freed). To keep the world a living patchwork,
 `maintain_clans` re-forms villages from masterless **refugees** when war thins the

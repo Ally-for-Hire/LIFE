@@ -41,6 +41,8 @@ const PROMOTION_ROUTING_TOLERANCE: f32 = 0.02;
 const PROMOTION_COVERAGE_TOLERANCE: f32 = 0.05;
 #[cfg(test)]
 const PROMOTION_LOGISTICS_TOLERANCE: f32 = 0.02;
+#[cfg(test)]
+const PROMOTION_TRADE_TOLERANCE: f32 = 0.05;
 
 #[derive(Clone)]
 struct QdElite {
@@ -65,6 +67,7 @@ pub struct AiBenchmarkReport {
     pub mean_reserve_security: f32,
     pub mean_task_coverage: f32,
     pub mean_care: f32,
+    pub mean_trade: f32,
     pub routing_entropy: f32,
     pub expert_coverage: f32,
     pub eligible: bool,
@@ -138,6 +141,34 @@ pub struct CareBenchmarkReport {
     pub survival_non_regression: bool,
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct TradeBenchmarkArm {
+    pub robust_survival: f32,
+    pub mean_security: f32,
+    pub clan_cohort_survival: f32,
+    pub neutral_cohort_survival: f32,
+    pub fairness_delta: f32,
+    pub robust_fairness_delta: f32,
+    pub trade_value: f32,
+    pub delivered_food: f32,
+    pub delivered_wood: f32,
+    pub deliveries: f32,
+    pub eligible: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub struct TradeBenchmarkReport {
+    pub worlds: usize,
+    pub enabled: TradeBenchmarkArm,
+    pub disabled: TradeBenchmarkArm,
+    pub clan_survival_delta: f32,
+    pub security_delta: f32,
+    pub delivered_material_delta: f32,
+    pub survival_non_regression: bool,
+}
+
 #[derive(Clone)]
 pub struct TrainCfg {
     pub pop_size: usize,
@@ -206,6 +237,7 @@ pub struct Trainer {
     pub mean_reserve_security: f32,
     pub mean_task_coverage: f32,
     pub mean_care: f32,
+    pub mean_trade: f32,
     pub routing_balance: f32,
     pub history: Vec<[f64; 2]>,     // (generation, best fitness)
     pub avg_history: Vec<[f64; 2]>, // (generation, average fitness)
@@ -251,6 +283,7 @@ impl Trainer {
             mean_reserve_security: 0.0,
             mean_task_coverage: 0.0,
             mean_care: 0.0,
+            mean_trade: 0.0,
             routing_balance: 0.0,
             history: Vec::new(),
             avg_history: Vec::new(),
@@ -443,7 +476,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
 
         // King-of-the-hill champion: periodically benchmark the reigning champion
         // and this generation's best on the SAME fixed worlds. A headline winner
-        // must then pass the paired logistics gate before it can replace the saved
+        // must then pass the paired logistics and trade gates before it can replace the saved
         // brain. Saving remains atomic + fsync'd (durable against crash / power loss).
         if champion.is_none() || champ_score == f32::MIN || tr.generation % BENCH_EVERY == 0 {
             let base = tr.cfg.arena_params.clone();
@@ -481,14 +514,37 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                             LOGISTICS_GATE_SEED,
                         )
                     });
+                    let challenger_trade = benchmark_trade_quality(
+                        challenger
+                            .as_ref()
+                            .expect("benchmarked challenger should exist"),
+                        &base,
+                        stage,
+                        gate_episode,
+                        LOGISTICS_GATE_WORLDS,
+                        0x7ADE_BEEF,
+                    );
+                    let reigning_trade = champion.as_ref().map(|brain| {
+                        benchmark_trade_quality(
+                            brain,
+                            &base,
+                            stage,
+                            gate_episode,
+                            LOGISTICS_GATE_WORLDS,
+                            0x7ADE_BEEF,
+                        )
+                    });
                     let rejections = champion_promotion_rejections(
                         &hq,
                         reigning.as_ref(),
                         &challenger_logistics,
                         reigning_logistics.as_ref(),
+                        &challenger_trade,
+                        reigning_trade.as_ref(),
                     );
                     let accepted = rejections.is_empty();
-                    gate_result = Some((accepted, rejections, challenger_logistics));
+                    gate_result =
+                        Some((accepted, rejections, challenger_logistics, challenger_trade));
                     if accepted {
                         champion = challenger;
                         champ_score = hq.fitness;
@@ -513,7 +569,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
             append(
                 log_path,
                 &format!(
-                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} haul {:.2} roads {:.2} reserve {:.2} tasks {:.2} care {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
+                    "    [benchmark] champion {:.0} survival {:.2} security {:.2} logistics {:.2} haul {:.2} roads {:.2} reserve {:.2} tasks {:.2} care {:.2} trade {:.2} routing {:.2}/{:.2} on {} fixed worlds (stage {})\n",
                     champ_score,
                     cq.robust_survival,
                     cq.security,
@@ -523,13 +579,14 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                     cq.reserve_security,
                     cq.task_coverage,
                     cq.care,
+                    cq.trade,
                     cq.routing_entropy,
                     cq.expert_coverage,
                     BENCH_WORLDS,
                     tr.stage
                 ),
             );
-            if let Some((accepted, rejections, logistics)) = gate_result {
+            if let Some((accepted, rejections, logistics, trade)) = gate_result {
                 let verdict = if accepted { "accepted" } else { "rejected" };
                 append(
                     log_path,
@@ -545,6 +602,16 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                         } else {
                             rejections.join(", ")
                         },
+                    ),
+                );
+                append(
+                    log_path,
+                    &format!(
+                        "    [trade gate] {verdict}: paired survival {:+.3}, security {:+.3}, delivered {:+.1}, trips {:.1}\n",
+                        trade.clan_survival_delta,
+                        trade.security_delta,
+                        trade.delivered_material_delta,
+                        trade.enabled.deliveries,
                     ),
                 );
             }
@@ -664,6 +731,7 @@ impl Trainer {
         self.mean_reserve_security = best_quality.reserve_security;
         self.mean_task_coverage = best_quality.task_coverage;
         self.mean_care = best_quality.care;
+        self.mean_trade = best_quality.trade;
         self.routing_balance = best_quality.routing_entropy * best_quality.expert_coverage;
         let improvement_margin = self.best_ever.abs().max(1.0) * 0.002;
         if self.best_fitness > self.best_ever + improvement_margin {
@@ -1047,6 +1115,7 @@ impl QualityTotals {
         self.sum.reserve_security += score.reserve_security;
         self.sum.task_coverage += score.task_coverage;
         self.sum.care += score.care;
+        self.sum.trade += score.trade;
         self.sum.defense += score.defense;
         self.sum.combat += score.combat;
         self.robust_survival = self.robust_survival.min(score.survival);
@@ -1079,6 +1148,7 @@ impl QualityTotals {
             reserve_security: self.sum.reserve_security * inv,
             task_coverage: self.sum.task_coverage * inv,
             care: self.sum.care * inv,
+            trade: self.sum.trade * inv,
             defense: self.sum.defense * inv,
             combat: self.sum.combat * inv,
             routing_entropy,
@@ -1431,6 +1501,7 @@ pub fn benchmark_ai_quality(
         mean_reserve_security: quality.reserve_security,
         mean_task_coverage: quality.task_coverage,
         mean_care: quality.care,
+        mean_trade: quality.trade,
         routing_entropy: quality.routing_entropy,
         expert_coverage: quality.expert_coverage,
         eligible: quality.eligible && fairness_delta >= -0.05,
@@ -1789,6 +1860,183 @@ fn run_care_benchmark_arm(
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy)]
+struct TradeBenchmarkObservation {
+    quality: QualityScore,
+    clan_cohort_survival: f32,
+    neutral_cohort_survival: f32,
+    delivered_food: f32,
+    delivered_wood: f32,
+    deliveries: f32,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct TradeArmTotals {
+    quality: QualityTotals,
+    clan_cohort_survival: f32,
+    neutral_cohort_survival: f32,
+    delivered_food: f32,
+    delivered_wood: f32,
+    deliveries: f32,
+    count: u32,
+}
+
+#[cfg(test)]
+impl TradeArmTotals {
+    fn add(&mut self, observation: TradeBenchmarkObservation) {
+        self.quality.add(observation.quality);
+        self.clan_cohort_survival += observation.clan_cohort_survival;
+        self.neutral_cohort_survival += observation.neutral_cohort_survival;
+        self.delivered_food += observation.delivered_food;
+        self.delivered_wood += observation.delivered_wood;
+        self.deliveries += observation.deliveries;
+        self.count += 1;
+    }
+
+    fn finish(self, brain: &Brain) -> TradeBenchmarkArm {
+        if self.count == 0 {
+            return TradeBenchmarkArm::default();
+        }
+        let inv = 1.0 / self.count as f32;
+        let quality = self.quality.finish(brain);
+        let clan_cohort_survival = self.clan_cohort_survival * inv;
+        let neutral_cohort_survival = self.neutral_cohort_survival * inv;
+        TradeBenchmarkArm {
+            robust_survival: quality.robust_survival,
+            mean_security: quality.security,
+            clan_cohort_survival,
+            neutral_cohort_survival,
+            fairness_delta: clan_cohort_survival - neutral_cohort_survival,
+            robust_fairness_delta: quality.robust_fairness,
+            trade_value: quality.trade,
+            delivered_food: self.delivered_food * inv,
+            delivered_wood: self.delivered_wood * inv,
+            deliveries: self.deliveries * inv,
+            eligible: quality.eligible
+                && clan_cohort_survival - neutral_cohort_survival >= FAIRNESS_FLOOR,
+        }
+    }
+}
+
+/// Compare physical Trade/Diplomacy V1 against a no-trade control on identical
+/// worlds. Existing food/wood, policy dimensions, and hostile behavior remain.
+#[cfg(test)]
+pub fn benchmark_trade_quality(
+    brain: &Brain,
+    base: &Params,
+    stage: u32,
+    episode: i32,
+    n_worlds: usize,
+    seed: u64,
+) -> TradeBenchmarkReport {
+    if n_worlds == 0 {
+        return TradeBenchmarkReport::default();
+    }
+    let paired: Vec<(TradeBenchmarkObservation, TradeBenchmarkObservation)> = (0..n_worlds)
+        .into_par_iter()
+        .map(|world_index| {
+            let mut rng = Rng::new(seed ^ (world_index as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let effective_stage = (world_index as u32) % (stage + 1);
+            let spec = random_world_spec(base, &mut rng, effective_stage);
+            let arena_seed =
+                seed.wrapping_add((world_index as u64).wrapping_mul(0xD1B5_4A32_D192_ED03));
+            (
+                run_trade_benchmark_arm(brain, &spec, episode, arena_seed, true),
+                run_trade_benchmark_arm(brain, &spec, episode, arena_seed, false),
+            )
+        })
+        .collect();
+    let mut enabled_totals = TradeArmTotals::default();
+    let mut disabled_totals = TradeArmTotals::default();
+    for (enabled, disabled) in paired {
+        enabled_totals.add(enabled);
+        disabled_totals.add(disabled);
+    }
+    let enabled = enabled_totals.finish(brain);
+    let disabled = disabled_totals.finish(brain);
+    let clan_survival_delta = enabled.clan_cohort_survival - disabled.clan_cohort_survival;
+    TradeBenchmarkReport {
+        worlds: n_worlds,
+        clan_survival_delta,
+        security_delta: enabled.mean_security - disabled.mean_security,
+        delivered_material_delta: enabled.delivered_food + enabled.delivered_wood
+            - disabled.delivered_food
+            - disabled.delivered_wood,
+        survival_non_regression: enabled.robust_survival + 1e-6 >= disabled.robust_survival
+            && clan_survival_delta >= -1e-6,
+        enabled,
+        disabled,
+    }
+}
+
+#[cfg(test)]
+fn run_trade_benchmark_arm(
+    brain: &Brain,
+    spec: &WorldSpec,
+    episode: i32,
+    seed: u64,
+    community_trade: bool,
+) -> TradeBenchmarkObservation {
+    let mut world = World::new(spec.world_size, seed);
+    world.params = spec.params.clone();
+    world.params.community_trade = community_trade;
+    let brains = [brain.clone(), brain.clone(), brain.clone()];
+    let ids = world.setup_arena(&brains, spec.trees, spec.neutrals);
+    let clan_id = ids[0];
+    let clan_cohort: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.clan == clan_id)
+        .map(|entity| entity.id)
+        .collect();
+    let neutral_cohort: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.clan < 0)
+        .map(|entity| entity.id)
+        .collect();
+    for _ in 0..episode {
+        world.step();
+    }
+    let alive: HashSet<u32> = world
+        .entities
+        .iter()
+        .filter(|entity| entity.is_active())
+        .map(|entity| entity.id)
+        .collect();
+    let cohort_ratio = |cohort: &HashSet<u32>| {
+        if cohort.is_empty() {
+            1.0
+        } else {
+            cohort.iter().filter(|id| alive.contains(id)).count() as f32 / cohort.len() as f32
+        }
+    };
+    let clan_cohort_survival = cohort_ratio(&clan_cohort);
+    let neutral_cohort_survival = cohort_ratio(&neutral_cohort);
+    let mut quality = score_clan_quality(&world, clan_id);
+    quality.fairness = clan_cohort_survival - neutral_cohort_survival;
+    quality.robust_fairness = quality.fairness;
+    quality.eligible &= quality.fairness >= FAIRNESS_FLOOR;
+    let (delivered_food, delivered_wood, deliveries) =
+        world.clan_by_id(clan_id).map_or((0.0, 0.0, 0.0), |clan| {
+            (
+                clan.stats.trade_food_sent as f32,
+                clan.stats.trade_wood_sent as f32,
+                clan.stats.trade_deliveries as f32,
+            )
+        });
+    TradeBenchmarkObservation {
+        quality,
+        clan_cohort_survival,
+        neutral_cohort_survival,
+        delivered_food,
+        delivered_wood,
+        deliveries,
+    }
+}
+
+#[cfg(test)]
 fn quality_better(challenger: &QualityScore, reigning: &QualityScore) -> bool {
     match (challenger.eligible, reigning.eligible) {
         (true, false) => true,
@@ -1803,6 +2051,8 @@ fn champion_promotion_rejections(
     reigning: Option<&QualityScore>,
     logistics: &LogisticsBenchmarkReport,
     reigning_logistics: Option<&LogisticsBenchmarkReport>,
+    trade: &TradeBenchmarkReport,
+    reigning_trade: Option<&TradeBenchmarkReport>,
 ) -> Vec<&'static str> {
     let mut reasons = Vec::new();
     if !challenger.eligible {
@@ -1848,6 +2098,9 @@ fn champion_promotion_rejections(
         }
         if challenger.care + PROMOTION_COVERAGE_TOLERANCE < current.care {
             reasons.push("community care regressed from champion");
+        }
+        if challenger.trade + PROMOTION_COVERAGE_TOLERANCE < current.trade {
+            reasons.push("delivered trade regressed from champion");
         }
     }
 
@@ -1899,6 +2152,50 @@ fn champion_promotion_rejections(
         let current_value = promotion_logistics_value(&current.enabled);
         if candidate_value + PROMOTION_LOGISTICS_TOLERANCE < current_value {
             reasons.push("causal logistics value regressed from champion");
+        }
+    }
+
+    if !trade.enabled.eligible {
+        reasons.push("trade-enabled benchmark ineligible");
+    }
+    if trade.enabled.robust_survival < PROMOTION_SURVIVAL_FLOOR {
+        reasons.push("trade-enabled survival below promotion floor");
+    }
+    if trade.enabled.mean_security < PROMOTION_SECURITY_FLOOR {
+        reasons.push("trade-enabled security below promotion floor");
+    }
+    if trade.enabled.fairness_delta < PROMOTION_FAIRNESS_FLOOR {
+        reasons.push("trade-enabled clans underperform neutrals");
+    }
+    if trade.enabled.robust_fairness_delta < FAIRNESS_FLOOR {
+        reasons.push("trade-enabled worst-world fairness below floor");
+    }
+    if !trade.survival_non_regression {
+        reasons.push("trade reduces paired survival");
+    }
+    if trade.security_delta < -PROMOTION_SECURITY_TOLERANCE {
+        reasons.push("trade reduces paired food security");
+    }
+    if trade.delivered_material_delta <= 0.0 || trade.enabled.deliveries <= 0.0 {
+        reasons.push("trade does not deliver physical material");
+    }
+
+    if let Some(current) = reigning_trade {
+        if trade.enabled.robust_survival + f32::EPSILON < current.enabled.robust_survival {
+            reasons.push("paired trade survival regressed from champion");
+        }
+        if trade.enabled.mean_security + PROMOTION_SECURITY_TOLERANCE
+            < current.enabled.mean_security
+        {
+            reasons.push("paired trade security regressed from champion");
+        }
+        if trade.enabled.fairness_delta + PROMOTION_SECURITY_TOLERANCE
+            < current.enabled.fairness_delta
+        {
+            reasons.push("paired trade fairness regressed from champion");
+        }
+        if trade.enabled.trade_value + PROMOTION_TRADE_TOLERANCE < current.enabled.trade_value {
+            reasons.push("causal trade value regressed from champion");
         }
     }
     reasons
@@ -2017,6 +2314,7 @@ mod tests {
         assert!((a.mean_reserve_security - b.mean_reserve_security).abs() < 1e-6);
         assert!((a.mean_task_coverage - b.mean_task_coverage).abs() < 1e-6);
         assert!((a.mean_care - b.mean_care).abs() < 1e-6);
+        assert!((a.mean_trade - b.mean_trade).abs() < 1e-6);
         assert!((0.0..=1.0).contains(&a.routing_entropy));
         assert!((0.0..=1.0).contains(&a.expert_coverage));
         assert!(
@@ -2166,6 +2464,61 @@ mod tests {
         }
     }
 
+    #[test]
+    fn trade_ablation_is_deterministic() {
+        let brain = Brain::load(CHAMPION_PATH).expect("tracked champion.bin should load");
+        let base = Params::default();
+        let a = benchmark_trade_quality(&brain, &base, 3, 1500, 4, 0x7ADE_5EED);
+        let b = benchmark_trade_quality(&brain, &base, 3, 1500, 4, 0x7ADE_5EED);
+        assert_eq!(a.worlds, b.worlds);
+        assert!((a.clan_survival_delta - b.clan_survival_delta).abs() < 1e-6);
+        assert!((a.security_delta - b.security_delta).abs() < 1e-6);
+        assert!((a.delivered_material_delta - b.delivered_material_delta).abs() < 1e-6);
+        assert!((a.enabled.trade_value - b.enabled.trade_value).abs() < 1e-6);
+        assert!((a.enabled.deliveries - b.enabled.deliveries).abs() < 1e-6);
+        assert!(
+            (a.enabled.neutral_cohort_survival - b.enabled.neutral_cohort_survival).abs() < 1e-6
+        );
+        assert!((a.enabled.robust_fairness_delta - b.enabled.robust_fairness_delta).abs() < 1e-6);
+        assert_eq!(a.disabled.deliveries, 0.0);
+    }
+
+    #[test]
+    fn tracked_champion_trade_preserves_survival_gates() {
+        let brain = Brain::load(CHAMPION_PATH).expect("tracked champion.bin should load");
+        let report =
+            benchmark_trade_quality(&brain, &Params::default(), MAX_STAGE, 4000, 13, 0x7ADE_BEEF);
+        println!("Trade/Diplomacy V1 paired benchmark: {report:#?}");
+        assert!(
+            report.enabled.eligible,
+            "trade enabled became ineligible: {report:#?}"
+        );
+        assert!(
+            report.enabled.robust_survival >= PROMOTION_SURVIVAL_FLOOR,
+            "trade robust survival regressed: {report:#?}"
+        );
+        assert!(
+            report.enabled.mean_security >= PROMOTION_SECURITY_FLOOR,
+            "trade food security regressed: {report:#?}"
+        );
+        assert!(
+            report.enabled.fairness_delta >= FAIRNESS_FLOOR,
+            "trade clan fairness regressed: {report:#?}"
+        );
+        assert!(
+            report.survival_non_regression,
+            "trade reduced paired cohort survival: {report:#?}"
+        );
+        assert!(
+            report.security_delta >= -PROMOTION_SECURITY_TOLERANCE,
+            "trade reduced paired food security: {report:#?}"
+        );
+        assert!(
+            report.delivered_material_delta > 0.0 && report.enabled.deliveries > 0.0,
+            "trade treatment did not produce physical deliveries: {report:#?}"
+        );
+    }
+
     fn promotion_quality(fitness: f32) -> QualityScore {
         QualityScore {
             fitness,
@@ -2226,17 +2579,55 @@ mod tests {
         }
     }
 
+    fn promotion_trade(trade_value: f32, deliveries: f32) -> TradeBenchmarkReport {
+        let enabled = TradeBenchmarkArm {
+            robust_survival: 1.0,
+            mean_security: 0.90,
+            clan_cohort_survival: 1.0,
+            neutral_cohort_survival: 0.95,
+            fairness_delta: 0.05,
+            robust_fairness_delta: 0.0,
+            trade_value,
+            delivered_food: deliveries * 0.6,
+            delivered_wood: deliveries * 0.4,
+            deliveries,
+            eligible: true,
+        };
+        TradeBenchmarkReport {
+            worlds: 13,
+            enabled,
+            disabled: TradeBenchmarkArm {
+                robust_survival: 1.0,
+                mean_security: 0.90,
+                clan_cohort_survival: 1.0,
+                neutral_cohort_survival: 0.95,
+                fairness_delta: 0.05,
+                robust_fairness_delta: 0.0,
+                eligible: true,
+                ..TradeBenchmarkArm::default()
+            },
+            clan_survival_delta: 0.0,
+            security_delta: 0.0,
+            delivered_material_delta: deliveries,
+            survival_non_regression: true,
+        }
+    }
+
     #[test]
     fn champion_promotion_accepts_a_safe_causal_improvement() {
         let incumbent = promotion_quality(100.0);
         let challenger = promotion_quality(110.0);
         let incumbent_logistics = promotion_logistics(0.48, 0.28);
         let challenger_logistics = promotion_logistics(0.52, 0.32);
+        let incumbent_trade = promotion_trade(0.40, 10.0);
+        let challenger_trade = promotion_trade(0.45, 12.0);
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
             &challenger_logistics,
             Some(&incumbent_logistics),
+            &challenger_trade,
+            Some(&incumbent_trade),
         );
         assert!(
             rejections.is_empty(),
@@ -2250,11 +2641,14 @@ mod tests {
         let mut challenger = promotion_quality(200.0);
         challenger.robust_survival = 0.90;
         let logistics = promotion_logistics(0.52, 0.32);
+        let trade = promotion_trade(0.45, 12.0);
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
             &logistics,
             Some(&logistics),
+            &trade,
+            Some(&trade),
         );
         assert!(rejections.contains(&"robust survival below promotion floor"));
         assert!(rejections.contains(&"robust survival regressed from champion"));
@@ -2268,16 +2662,40 @@ mod tests {
         let mut challenger_logistics = promotion_logistics(0.20, 0.0);
         challenger_logistics.security_delta = -0.02;
         challenger_logistics.survival_non_regression = false;
+        let trade = promotion_trade(0.45, 12.0);
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
             &challenger_logistics,
             Some(&incumbent_logistics),
+            &trade,
+            Some(&trade),
         );
         assert!(rejections.contains(&"logistics reduces paired survival"));
         assert!(rejections.contains(&"logistics reduces paired food security"));
         assert!(rejections.contains(&"logistics does not improve paired transport"));
         assert!(rejections.contains(&"causal logistics value regressed from champion"));
+    }
+
+    #[test]
+    fn champion_promotion_rejects_inert_or_regressed_trade() {
+        let incumbent = promotion_quality(100.0);
+        let challenger = promotion_quality(110.0);
+        let logistics = promotion_logistics(0.52, 0.32);
+        let incumbent_trade = promotion_trade(0.50, 12.0);
+        let mut challenger_trade = promotion_trade(0.0, 0.0);
+        challenger_trade.security_delta = -0.02;
+        let rejections = champion_promotion_rejections(
+            &challenger,
+            Some(&incumbent),
+            &logistics,
+            Some(&logistics),
+            &challenger_trade,
+            Some(&incumbent_trade),
+        );
+        assert!(rejections.contains(&"trade reduces paired food security"));
+        assert!(rejections.contains(&"trade does not deliver physical material"));
+        assert!(rejections.contains(&"causal trade value regressed from champion"));
     }
 
     #[test]

@@ -13,6 +13,7 @@ no JSON snapshot or HTTP layer like the old JS prototype had.
 | `world.rs` | `World` + `Params`: the grid, entities, trees, clans, the per-tick `step`, and all gameplay rules. |
 | `entity.rs` | `Entity` (one NPC) and its `Goal` (the "idea" shown in the inspector). |
 | `clan.rs` | `Clan`, `ClanMode`, clan stats, and the clan color helper. |
+| `diplomacy.rs` | Deterministic sorted relationship ledger: trust, temporary pacts, delivered volume, and decay/pruning. |
 | `brain.rs` | `Brain`: the hierarchical mixture-of-experts leader policy — a master gate routing over sub-minds (evaluate / mutate / crossover). |
 | `quality.rs` | Survival/security metrics, routing-health probes, and the survivor/builder/cooperator/defender/raider niche definitions. |
 | `trainer.rs` | `Trainer` + `TrainCfg`: parallel arena evaluation, fixed behavioral benchmarks, quality-diversity archive, and evolution. |
@@ -52,7 +53,9 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
    coverage, stored wood, and nearby wood availability without changing the fixed
    32-input brain shape. Every 15 ticks it refreshes cached targets (nearest
    enemy, neutral, trespasser, fertility-scored frontier). Targets are cached on
-   the clan so per-entity updates never scan the world.
+   the clan so per-entity updates never scan the world. A preceding diplomacy
+   refresh selects partners, decays relationship memory, and caches route threats; inputs
+   22–24 expose relation, partner count, and delivered volume.
 4. **prepare rescues**, **rebuild occupancy**, then **update each entity**
    (hunger first; assigned care response next; then its ordinary community role,
    movement, delivery, and road work). **advance rescues** physically carries
@@ -95,6 +98,10 @@ Entities and clans are plain `Vec`s; the dead are removed with in-place
   arm, only active entities participate in work, hostility, reproduction, and
   cohort survival; deterministic rescue assignments and persistent carrying
   links make care part of world state without changing brain dimensions.
+- `community_trade=false` keeps reserved inputs 22–24 at zero and disables every
+  pact, courier, relationship target, allied-passage, and route-defense effect.
+  Trade uses no feature-specific random draws, so paired arms diverge only after
+  delivered resources and diplomacy alter behavior.
 
 ## Logistics validation counters
 

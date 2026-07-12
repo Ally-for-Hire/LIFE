@@ -75,6 +75,8 @@ pub struct QualityScore {
     pub task_coverage: f32,
     /// Successful recovery of incapacitated clanmates, normalized by member-time.
     pub care: f32,
+    /// Physically delivered inter-clan food/wood per member-time.
+    pub trade: f32,
     pub defense: f32,
     pub combat: f32,
     pub routing_entropy: f32,
@@ -100,6 +102,7 @@ impl Default for QualityScore {
             reserve_security: 0.0,
             task_coverage: 0.0,
             care: 0.0,
+            trade: 0.0,
             defense: 0.0,
             combat: 0.0,
             routing_entropy: 0.0,
@@ -116,13 +119,14 @@ impl QualityScore {
                 + self.security * 0.35
                 + ((self.fairness + 1.0) * 0.5).clamp(0.0, 1.0) * 0.20,
             self.settlement * 0.45 + self.expansion * 0.35 + self.security * 0.20,
-            self.cooperation * 0.35
-                + self.logistics * 0.20
-                + self.reserve_security * 0.15
+            self.cooperation * 0.30
+                + self.logistics * 0.18
+                + self.reserve_security * 0.12
                 + self.task_coverage * 0.10
-                + self.care * 0.15
-                + self.survival * 0.07
-                + self.security * 0.03,
+                + self.care * 0.10
+                + self.trade * 0.15
+                + self.survival * 0.03
+                + self.security * 0.02,
             self.defense * 0.55 + self.settlement * 0.20 + self.survival * 0.25,
             self.combat * 0.60 + self.expansion * 0.15 + self.survival * 0.25,
         ]
@@ -234,6 +238,13 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
     } else {
         c.stats.rescues as f32 / c.stats.incapacitations as f32
     };
+    let trade_events = c
+        .stats
+        .trade_food_sent
+        .saturating_add(c.stats.trade_food_received)
+        .saturating_add(c.stats.trade_wood_sent)
+        .saturating_add(c.stats.trade_wood_received);
+    let trade = saturating_rate(rate_per_1k(trade_events), 2.0);
 
     let role_total = c.stats.role_tick_sum.iter().sum::<u64>() as f32;
     let task_coverage = if role_total > 0.0 {
@@ -288,11 +299,12 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
         .clamp(0.0, 1.0);
     let expansion = (c.fertile_capacity.sqrt() / 14.0 + terr.sqrt() / 160.0).clamp(0.0, 1.0);
     let recruitment = (recruits / (recruits + 8.0)).clamp(0.0, 1.0);
-    let cooperation = (recruitment * 0.20
-        + logistics * 0.25
-        + reserve_security * 0.20
-        + task_coverage * 0.20
-        + care * 0.15)
+    let cooperation = (recruitment * 0.15
+        + logistics * 0.20
+        + reserve_security * 0.15
+        + task_coverage * 0.15
+        + care * 0.15
+        + trade * 0.20)
         .clamp(0.0, 1.0);
     let defense = (survival * (1.0 - losses / (losses + pop + 1.0))).clamp(0.0, 1.0);
     let combat = if kills <= 0.0 {
@@ -317,6 +329,7 @@ pub fn score_clan(w: &World, cid: i32) -> QualityScore {
         reserve_security,
         task_coverage,
         care,
+        trade,
         defense,
         combat,
         routing_entropy: 0.0,
@@ -408,7 +421,7 @@ mod tests {
 /// gate collapses per decision; coverage measures how many experts receive a
 /// meaningful average share across different situations.
 pub fn routing_metrics(brain: &Brain) -> (f32, f32) {
-    let mut probes = [[0.0f32; N_IN]; 8];
+    let mut probes = [[0.0f32; N_IN]; 11];
     for probe in &mut probes {
         probe[0] = 0.30;
         probe[1] = 0.50;
@@ -432,6 +445,16 @@ pub fn routing_metrics(brain: &Brain) -> (f32, f32) {
     probes[6][2] = 0.60;
     probes[7][13] = 1.0; // rich summer
     probes[7][15] = 1.0;
+    probes[8][22] = 0.50; // neutral new trade relationship
+    probes[8][23] = 0.25;
+    probes[9][22] = 0.90; // trusted, high-volume trade network
+    probes[9][23] = 1.0;
+    probes[9][24] = 0.80;
+    probes[10][6] = 0.70; // hostile relation threatening a trade route
+    probes[10][13] = 1.0;
+    probes[10][22] = 0.10;
+    probes[10][23] = 0.50;
+    probes[10][24] = 0.40;
 
     let mut entropy_sum = 0.0;
     let mut mean_gate = [0.0f32; N_EXPERTS];

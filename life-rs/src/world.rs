@@ -13,6 +13,7 @@
 
 use crate::brain::{Brain, N_EXPERTS, N_MODES, N_OUT};
 use crate::clan::{hue_color, Clan, ClanMode};
+use crate::diplomacy::DiplomacyLedger;
 use crate::entity::{Entity, Goal};
 use crate::grid::{terrain, Grid, NO_OWNER};
 use crate::rng::Rng;
@@ -77,6 +78,15 @@ const STOCKPILE_FOOD_PER_MEMBER: i32 = 4;
 const RESCUE_WINDOW_TICKS: i32 = 240;
 const RESCUE_RADIUS: i32 = 12;
 const RESCUE_REVIVE_HEALTH: f32 = 0.35;
+const TRADE_REFRESH_INTERVAL: i32 = CLAN_THINK_INTERVAL;
+const TRADE_RANGE: i32 = 60;
+const TRADE_PACT_TICKS: i32 = CLAN_THINK_INTERVAL * 6;
+const TRADE_PACT_MIN_MATERIAL: f32 = 9.0;
+const TRADE_ALLY_TRUST: f32 = 0.15;
+const TRADE_FOOD_FLOOR_PER_MEMBER: i32 = 8;
+const TRADE_WOOD_FLOOR: i32 = 6;
+const TRADE_FOOD_LOAD: i32 = 2;
+const TRADE_WOOD_LOAD: i32 = 1;
 /// Above this hunger, an outsider will steal from foreign farmland to survive —
 /// which makes them a trespasser and triggers the owner's defense. Below it,
 /// a clan's crops feed only its own people (despotic exclusion).
@@ -123,6 +133,7 @@ pub struct Params {
     pub disaster_rate: f32, // chance/intensity of regional blights (0 = off)
     pub community_logistics: bool, // shared reserves, wood labor, and roads
     pub community_care: bool, // incapacitation, evacuation, and recovery
+    pub community_trade: bool, // relationship memory and physical surplus exchange
     // population growth
     pub birth_chance: f32,    // chance per pair of NPCs per reproduction check
     pub birth_interval: i32,  // ticks between reproduction checks
@@ -170,6 +181,7 @@ impl Default for Params {
             disaster_rate: 0.0,       // off by default; the curriculum ramps it in
             community_logistics: true,
             community_care: true,
+            community_trade: true,
             birth_chance: D_BIRTH_CHANCE,
             birth_interval: D_BIRTH_INTERVAL,
             birth_food_cost: D_BIRTH_FOOD_COST,
@@ -195,6 +207,7 @@ pub struct World {
     pub clans: Vec<Clan>,
     pub rng: Rng,
     pub params: Params,
+    pub diplomacy: DiplomacyLedger,
     next_entity_id: u32,
     next_clan_id: i32,
     pellet_total: usize,
@@ -227,6 +240,7 @@ impl World {
             clans: Vec::new(),
             rng: Rng::new(seed),
             params: Params::default(),
+            diplomacy: DiplomacyLedger::new(),
             next_entity_id: 1,
             next_clan_id: 1,
             pellet_total: 0,
@@ -272,6 +286,7 @@ impl World {
         self.deaths_starved = 0;
         self.deaths_combat = 0;
         self.births = 0;
+        self.diplomacy = DiplomacyLedger::new();
         self.disaster_level = 0.0;
         self.next_clan_id = 1;
     }
@@ -286,7 +301,7 @@ impl World {
     #[inline]
     fn is_foreign_tile(&self, x: i32, y: i32, own_clan: i32) -> bool {
         let o = self.grid.owner[self.grid.idx(x, y)];
-        o != NO_OWNER && o != own_clan
+        o != NO_OWNER && o != own_clan && !self.are_allied(own_clan, o)
     }
 
     /// Fractal value-noise field in [0,1], deterministic via the world rng.
@@ -541,6 +556,10 @@ impl World {
             downed_by_entity: None,
             rescue_target: None,
             carried_by: None,
+            trade_target_clan: -1,
+            trade_returning: false,
+            trade_food: 0,
+            trade_wood: 0,
             dead: false,
         }
     }
@@ -664,6 +683,15 @@ impl World {
                         + (c.stats.road_steps as f32).sqrt() * 0.12
                         + (c.stats.food_delivered as f32).sqrt() * 0.08
                         + c.stats.reserve_released as f32 * 0.15
+                } else {
+                    0.0
+                }
+                + if self.params.community_trade {
+                    (c.stats
+                        .trade_food_sent
+                        .saturating_add(c.stats.trade_wood_sent) as f32)
+                        .sqrt()
+                        * 0.10
                 } else {
                     0.0
                 };
@@ -1251,6 +1279,7 @@ impl World {
         self.update_trees();
         self.regrow_wood();
         self.maybe_disaster();
+        self.refresh_diplomacy();
         self.clan_think();
         self.prepare_rescues();
 
@@ -1551,6 +1580,158 @@ impl World {
         }
     }
 
+    fn refresh_diplomacy(&mut self) {
+        if self.tick % TRADE_REFRESH_INTERVAL != 0 {
+            return;
+        }
+        let live_ids: Vec<i32> = self
+            .clans
+            .iter()
+            .filter(|clan| !clan.disbanded)
+            .map(|clan| clan.id)
+            .collect();
+        self.diplomacy.prune(&live_ids);
+        self.diplomacy.decay(self.tick, 0.995, 0.85);
+        if !self.params.community_trade {
+            for clan in &mut self.clans {
+                clan.trade_partner = None;
+                clan.trade_route_threat = None;
+            }
+            return;
+        }
+
+        let homes: Vec<(usize, i32, i32, i32)> = self
+            .clans
+            .iter()
+            .enumerate()
+            .filter_map(|(index, clan)| {
+                (!clan.disbanded)
+                    .then_some(clan.stockpile.map(|home| (index, clan.id, home.0, home.1)))
+                    .flatten()
+            })
+            .collect();
+        let mut partners = vec![None; self.clans.len()];
+        for &(index, clan_id, x, y) in &homes {
+            let mut best = None;
+            for &(_, other_id, ox, oy) in &homes {
+                if clan_id == other_id {
+                    continue;
+                }
+                let distance = (x - ox).abs().max((y - oy).abs());
+                if distance > TRADE_RANGE {
+                    continue;
+                }
+                let trust = self
+                    .diplomacy
+                    .lookup(clan_id, other_id)
+                    .map_or(0.0, |relation| relation.trust);
+                if trust < -0.25 {
+                    continue;
+                }
+                let key = (distance, other_id);
+                if best.map_or(true, |current| key < current) {
+                    best = Some(key);
+                }
+            }
+            partners[index] = best.map(|(_, id)| id);
+        }
+
+        for (index, partner) in partners.into_iter().enumerate() {
+            self.clans[index].trade_partner = partner;
+            let Some(partner_id) = partner else {
+                self.clans[index].trade_route_threat = None;
+                continue;
+            };
+            let Some(home) = self.clans[index].stockpile else {
+                continue;
+            };
+            let Some(partner_home) = self.clan_by_id(partner_id).and_then(|clan| clan.stockpile)
+            else {
+                continue;
+            };
+            let clan_id = self.clans[index].id;
+            let threat = self
+                .entities
+                .iter()
+                .filter(|entity| self.is_trade_route_hostile(clan_id, partner_id, entity))
+                .min_by_key(|entity| {
+                    (
+                        route_distance_sq((entity.x, entity.y), home, partner_home),
+                        entity.id,
+                    )
+                })
+                .filter(|entity| route_distance_sq((entity.x, entity.y), home, partner_home) <= 36)
+                .map(|entity| entity.id);
+            self.clans[index].trade_route_threat = threat;
+        }
+    }
+
+    fn are_allied(&self, first: i32, second: i32) -> bool {
+        if !self.params.community_trade {
+            return first == second && first >= 0;
+        }
+        if first < 0 || second < 0 || first == second {
+            return first == second && first >= 0;
+        }
+        self.diplomacy
+            .lookup(first, second)
+            .is_some_and(|relation| {
+                relation.trust >= TRADE_ALLY_TRUST || relation.pact_active(self.tick)
+            })
+    }
+
+    fn has_trade_passage(&self, entity: &Entity, host_clan: i32) -> bool {
+        self.params.community_trade
+            && entity.is_active()
+            && entity.trade_target_clan == host_clan
+            && (entity.trade_food > 0 || entity.trade_wood > 0 || entity.trade_returning)
+    }
+
+    fn is_trade_route_hostile(&self, clan_id: i32, partner_id: i32, entity: &Entity) -> bool {
+        if !entity.is_active()
+            || entity.clan < 0
+            || entity.clan == clan_id
+            || entity.clan == partner_id
+            || self.are_allied(clan_id, entity.clan)
+        {
+            return false;
+        }
+        let trust = self
+            .diplomacy
+            .lookup(clan_id, entity.clan)
+            .map_or(0.0, |relation| relation.trust);
+        entity.work_role == ClanMode::Attack
+            || trust < 0.0
+            || self.clan_aggr(clan_id) + self.clan_aggr(entity.clan) >= self.params.war_threshold
+    }
+
+    fn trade_signals(&self, clan_idx: usize) -> (f32, f32, f32) {
+        if !self.params.community_trade {
+            return (0.0, 0.0, 0.0);
+        }
+        let clan_id = self.clans[clan_idx].id;
+        let relation = self.clans[clan_idx]
+            .trade_partner
+            .and_then(|partner| self.diplomacy.lookup(clan_id, partner))
+            .map_or(0.0, |entry| (entry.trust + 1.0) * 0.5);
+        let mut partners = 0usize;
+        let mut recent_volume = 0.0;
+        for entry in self.diplomacy.relationships() {
+            if entry.clan_low != clan_id && entry.clan_high != clan_id {
+                continue;
+            }
+            if entry.trust >= TRADE_ALLY_TRUST || entry.pact_active(self.tick) {
+                partners += 1;
+            }
+            recent_volume += entry.recent_food_delivered + entry.recent_wood_delivered;
+        }
+        (
+            relation.clamp(0.0, 1.0),
+            (partners as f32 / 3.0).min(1.0),
+            recent_volume / (recent_volume + 8.0),
+        )
+    }
+
     fn clan_think(&mut self) {
         let refresh = self.tick % TARGET_REFRESH_INTERVAL == 0;
         let decide = self.tick % CLAN_THINK_INTERVAL == 0;
@@ -1575,7 +1756,7 @@ impl World {
         let mut hunger_sum = vec![0f32; n];
         let mut health_sum = vec![0f32; n];
         let mut health_count = vec![0u32; n];
-        let mut clan_members: Vec<(i32, i32, i32)> = Vec::new();
+        let mut clan_members: Vec<(i32, i32, i32, i32, bool)> = Vec::new();
         let mut neutrals: Vec<(i32, i32)> = Vec::new();
 
         for e in &self.entities {
@@ -1595,7 +1776,13 @@ impl World {
                         leader_pos[idx] = Some((e.x, e.y));
                     }
                 }
-                clan_members.push((e.x, e.y, e.clan));
+                clan_members.push((
+                    e.x,
+                    e.y,
+                    e.clan,
+                    e.trade_target_clan,
+                    e.trade_food > 0 || e.trade_wood > 0 || e.trade_returning,
+                ));
             } else {
                 neutrals.push((e.x, e.y));
             }
@@ -1635,8 +1822,11 @@ impl World {
             let mut enemies_seen = 0;
             let mut tres = None;
             let mut td = i64::MAX;
-            for &(ex, ey, ec) in &clan_members {
-                if ec == id {
+            for &(ex, ey, ec, trade_target, active_trade) in &clan_members {
+                if ec == id
+                    || self.are_allied(id, ec)
+                    || self.params.community_trade && active_trade && trade_target == id
+                {
                     continue;
                 }
                 let dx = (ex - lp.0) as i64;
@@ -1657,7 +1847,7 @@ impl World {
             let mut enemy_stockpile = None;
             let mut sd = i64::MAX;
             for c in &self.clans {
-                if c.disbanded || c.id == id || c.food <= 0 {
+                if c.disbanded || c.id == id || c.food <= 0 || self.are_allied(id, c.id) {
                     continue;
                 }
                 if let Some((sx, sy)) = c.stockpile {
@@ -1747,6 +1937,7 @@ impl World {
                     (cells * self.params.max_pellet_fraction.clamp(0.0, 1.0)).max(1.0);
                 let world_food = (self.pellet_total as f32 / max_pellets).min(1.0);
                 let (road_access, available_wood) = self.logistics_signals(idx);
+                let (trade_relation, trade_partners, trade_volume) = self.trade_signals(idx);
 
                 // The situation vector the master + sub-minds read. Normalised,
                 // information-rich, and free of behavioural prescriptions — what
@@ -1780,9 +1971,9 @@ impl World {
                         0.0
                     }, // 20 stored wood / head
                     available_wood, // 21 reachable forest wood
-                    0.0,         // 22 diplomacy: relation with nearest clan (0 enemy .. 1 ally)
-                    0.0,         // 23 number of allies / trade partners
-                    0.0,         // 24 active trade inflow / volume
+                    trade_relation, // 22 relation with nearest trade partner
+                    trade_partners, // 23 allies / active trade partners
+                    trade_volume, // 24 recent delivered trade volume
                     0.0,         // 25 day/night phase (distinct from season)
                     self.clans[idx].soil_depletion.min(1.0), // 26 soil depletion of owned tiles
                     self.disaster_level, // 27 active disaster/event severity
@@ -2071,6 +2262,12 @@ impl World {
                     e.health -= self.params.starve_damage;
                     e.goal = Goal::Starving;
                     if e.health <= 0.0 {
+                        e.food += e.trade_food.max(0);
+                        e.wood += e.trade_wood.max(0);
+                        e.trade_target_clan = -1;
+                        e.trade_returning = false;
+                        e.trade_food = 0;
+                        e.trade_wood = 0;
                         e.dead = true;
                         self.deaths_starved += 1;
                         return;
@@ -2130,6 +2327,9 @@ impl World {
                 e.health -= self.params.starve_damage;
                 e.goal = Goal::Starving;
                 if e.health <= 0.0 {
+                    if e.trade_target_clan >= 0 {
+                        self.cancel_trade(e, cidx);
+                    }
                     e.dead = true;
                     self.deaths_starved += 1;
                     return;
@@ -2141,6 +2341,9 @@ impl World {
 
         if e.rescue_target.is_some() {
             e.goal = Goal::Rescuing;
+            return;
+        }
+        if e.trade_target_clan >= 0 && self.handle_trade(e, cidx) {
             return;
         }
 
@@ -2208,6 +2411,9 @@ impl World {
                 }
             }
             ClanMode::Gather => {
+                if self.handle_trade(e, cidx) {
+                    return;
+                }
                 if self.should_gather_wood(e, cidx) {
                     self.gather_wood(e, cidx);
                 } else {
@@ -2215,6 +2421,127 @@ impl World {
                 }
             }
         }
+    }
+
+    fn handle_trade(&mut self, entity: &mut Entity, clan_idx: usize) -> bool {
+        if !self.params.community_trade {
+            if entity.trade_target_clan >= 0 {
+                self.cancel_trade(entity, clan_idx);
+            }
+            return false;
+        }
+        if entity.trade_target_clan >= 0 {
+            if entity.trade_returning {
+                let Some(home) = self.clans[clan_idx].stockpile else {
+                    self.cancel_trade(entity, clan_idx);
+                    return false;
+                };
+                entity.goal = Goal::Trading;
+                self.move_toward(entity, home.0, home.1, false);
+                if (entity.x - home.0).abs().max((entity.y - home.1).abs()) <= 1 {
+                    entity.trade_target_clan = -1;
+                    entity.trade_returning = false;
+                }
+                return true;
+            }
+            let Some(partner_idx) = self.clan_index(entity.trade_target_clan) else {
+                self.cancel_trade(entity, clan_idx);
+                return false;
+            };
+            let Some(target) = self.clans[partner_idx].stockpile else {
+                self.cancel_trade(entity, clan_idx);
+                return false;
+            };
+            entity.goal = Goal::Trading;
+            self.move_toward(entity, target.0, target.1, false);
+            let distance = (entity.x - target.0).abs().max((entity.y - target.1).abs());
+            if distance > 1 {
+                return true;
+            }
+
+            let donor_id = self.clans[clan_idx].id;
+            let partner_id = self.clans[partner_idx].id;
+            let food = entity.trade_food.max(0);
+            let wood = entity.trade_wood.max(0);
+            self.clans[partner_idx].food += food;
+            self.clans[partner_idx].wood += wood;
+            self.clans[clan_idx].stats.trade_food_sent += food as u32;
+            self.clans[clan_idx].stats.trade_wood_sent += wood as u32;
+            self.clans[clan_idx].stats.trade_deliveries += 1;
+            self.clans[partner_idx].stats.trade_food_received += food as u32;
+            self.clans[partner_idx].stats.trade_wood_received += wood as u32;
+            self.diplomacy
+                .record_trade(donor_id, partner_id, food as u32, wood as u32, self.tick);
+            self.diplomacy
+                .adjust(donor_id, partner_id, 0.02 * (food + wood) as f32);
+            let repeated_aid =
+                self.diplomacy
+                    .lookup(donor_id, partner_id)
+                    .is_some_and(|relation| {
+                        relation.recent_food_delivered + relation.recent_wood_delivered
+                            >= TRADE_PACT_MIN_MATERIAL
+                    });
+            if repeated_aid {
+                self.diplomacy
+                    .set_pact(donor_id, partner_id, self.tick + TRADE_PACT_TICKS);
+            }
+            entity.trade_returning = true;
+            entity.trade_food = 0;
+            entity.trade_wood = 0;
+            return true;
+        }
+
+        if entity.is_leader {
+            return false;
+        }
+        let Some(partner_id) = self.clans[clan_idx].trade_partner else {
+            return false;
+        };
+        let Some(partner_idx) = self.clan_index(partner_id) else {
+            return false;
+        };
+        let Some(home) = self.clans[clan_idx].stockpile else {
+            return false;
+        };
+        if (entity.x, entity.y) != home {
+            return false;
+        }
+        let pop = self.clan_roster_size(clan_idx).max(1);
+        let partner_pop = self.clan_roster_size(partner_idx).max(1);
+        let food_surplus = (self.clans[clan_idx].food - pop * TRADE_FOOD_FLOOR_PER_MEMBER).max(0);
+        let wood_surplus = (self.clans[clan_idx].wood - TRADE_WOOD_FLOOR).max(0);
+        let food_gap = self.clans[clan_idx].food / pop - self.clans[partner_idx].food / partner_pop;
+        let wood_gap = self.clans[clan_idx].wood - self.clans[partner_idx].wood;
+        let food = if food_gap > 1 {
+            food_surplus.min(TRADE_FOOD_LOAD).min(food_gap)
+        } else {
+            0
+        };
+        let wood = if wood_gap > 1 {
+            wood_surplus.min(TRADE_WOOD_LOAD).min(wood_gap)
+        } else {
+            0
+        };
+        if food == 0 && wood == 0 {
+            return false;
+        }
+        self.clans[clan_idx].food -= food;
+        self.clans[clan_idx].wood -= wood;
+        entity.trade_target_clan = partner_id;
+        entity.trade_returning = false;
+        entity.trade_food = food;
+        entity.trade_wood = wood;
+        entity.goal = Goal::Trading;
+        true
+    }
+
+    fn cancel_trade(&mut self, entity: &mut Entity, clan_idx: usize) {
+        self.clans[clan_idx].food += entity.trade_food.max(0);
+        self.clans[clan_idx].wood += entity.trade_wood.max(0);
+        entity.trade_target_clan = -1;
+        entity.trade_returning = false;
+        entity.trade_food = 0;
+        entity.trade_wood = 0;
     }
 
     fn should_gather_wood(&self, e: &Entity, cidx: usize) -> bool {
@@ -2388,6 +2715,16 @@ impl World {
     }
 
     fn defend(&mut self, e: &mut Entity, cidx: usize) {
+        if self.params.community_trade {
+            if let Some(threat_id) = self.clans[cidx].trade_route_threat {
+                if let Some(threat) = self.entity_index(threat_id) {
+                    let (tx, ty) = (self.entities[threat].x, self.entities[threat].y);
+                    e.goal = Goal::GuardingTrade;
+                    self.move_toward(e, tx, ty, false);
+                    return;
+                }
+            }
+        }
         if let Some((sx, sy)) = self.clans[cidx].stockpile {
             e.goal = Goal::Defending;
             let d = (e.x - sx).abs().max((e.y - sy).abs());
@@ -2475,7 +2812,12 @@ impl World {
             }
             let hunger = e.hunger(starve_ticks);
             for &(victim_idx, victim_id, sx, sy) in &stockpiles {
-                if victim_id == e.clan || e.x != sx || e.y != sy {
+                if victim_id == e.clan
+                    || self.are_allied(e.clan, victim_id)
+                    || self.has_trade_passage(e, victim_id)
+                    || e.x != sx
+                    || e.y != sy
+                {
                     continue;
                 }
                 let aggr = self.clan_aggr(e.clan) + self.clans[victim_idx].aggression;
@@ -2496,6 +2838,8 @@ impl World {
             } else if let Some(ri) = self.clan_index(raider_clan) {
                 self.clans[ri].food += 1;
             }
+            let victim_id = self.clans[victim_idx].id;
+            self.diplomacy.adjust(raider_clan, victim_id, -0.08);
         }
     }
 
@@ -2524,16 +2868,24 @@ impl World {
                 }
             }
             self.entities[i].dead = true;
-            let loot = self.entities[i].food;
+            let loot_food = self.entities[i].food + self.entities[i].trade_food;
+            let loot_wood = self.entities[i].wood + self.entities[i].trade_wood;
             self.entities[i].food = 0;
+            self.entities[i].wood = 0;
+            self.entities[i].trade_food = 0;
+            self.entities[i].trade_wood = 0;
+            self.entities[i].trade_returning = false;
             if let Some(attacker) = attacker_entity.and_then(|id| self.entity_index(id)) {
                 if self.entities[attacker].is_active() {
-                    self.entities[attacker].food += loot;
+                    self.entities[attacker].food += loot_food;
+                    self.entities[attacker].wood += loot_wood;
                 } else if let Some(ci) = self.clan_index(attacker_clan) {
-                    self.clans[ci].food += loot;
+                    self.clans[ci].food += loot_food;
+                    self.clans[ci].wood += loot_wood;
                 }
             } else if let Some(ci) = self.clan_index(attacker_clan) {
-                self.clans[ci].food += loot;
+                self.clans[ci].food += loot_food;
+                self.clans[ci].wood += loot_wood;
             }
             self.deaths_combat += 1;
             if let Some(ci) = self.clan_index(victim_clan) {
@@ -2768,6 +3120,13 @@ impl World {
             // them (it's on campaign), not only on its own soil — this is what
             // lets a land-hungry clan press into a neighbour's territory.
             let on_campaign = !grace && self.entities[i].work_role == ClanMode::Attack;
+            let route_threat =
+                if self.params.community_trade && self.entities[i].work_role == ClanMode::Defend {
+                    self.clan_index(ec)
+                        .and_then(|clan_idx| self.clans[clan_idx].trade_route_threat)
+                } else {
+                    None
+                };
             let mut found = None;
             'search: for dy in -1..=1 {
                 for dx in -1..=1 {
@@ -2788,11 +3147,27 @@ impl World {
                             if o.dead || o.incapacitated_until > 0 || o.clan == ec {
                                 continue;
                             }
+                            if o.clan >= 0
+                                && (self.are_allied(ec, o.clan)
+                                    || self.has_trade_passage(&self.entities[i], o.clan)
+                                    || self.has_trade_passage(o, ec))
+                            {
+                                continue;
+                            }
                             let on_my_land = self.grid.owner[self.grid.idx(o.x, o.y)] == ec;
                             let at_war =
                                 !grace && o.clan >= 0 && aggr_self + self.clan_aggr(o.clan) >= war;
                             let raid = on_campaign && o.clan >= 0;
-                            if on_my_land || at_war || raid {
+                            let route_defense = o.clan >= 0
+                                && route_threat == Some(o.id)
+                                && self.clan_index(ec).is_some_and(|clan_idx| {
+                                    self.clans[clan_idx]
+                                        .trade_partner
+                                        .is_some_and(|partner_id| {
+                                            self.is_trade_route_hostile(ec, partner_id, o)
+                                        })
+                                });
+                            if on_my_land || at_war || raid || route_defense {
                                 found = Some(j);
                                 break 'search;
                             }
@@ -2815,10 +3190,13 @@ impl World {
                 continue;
             }
             self.entities[i].attack_cooldown = cd;
+            let attacker_clan = self.entities[i].clan;
+            let victim_clan = self.entities[j].clan;
+            if attacker_clan >= 0 && victim_clan >= 0 {
+                self.diplomacy.adjust(attacker_clan, victim_clan, -0.04);
+            }
             self.entities[j].health -= dmg;
             if self.entities[j].health <= 0.0 {
-                let attacker_clan = self.entities[i].clan;
-                let victim_clan = self.entities[j].clan;
                 if self.params.community_care && victim_clan >= 0 {
                     self.entities[j].health = 0.0;
                     self.entities[j].incapacitated_until = self.tick + RESCUE_WINDOW_TICKS;
@@ -2830,9 +3208,15 @@ impl World {
                     }
                 } else {
                     self.entities[j].dead = true;
-                    let loot = self.entities[j].food;
+                    let loot_food = self.entities[j].food + self.entities[j].trade_food;
+                    let loot_wood = self.entities[j].wood + self.entities[j].trade_wood;
                     self.entities[j].food = 0;
-                    self.entities[i].food += loot;
+                    self.entities[j].wood = 0;
+                    self.entities[j].trade_food = 0;
+                    self.entities[j].trade_wood = 0;
+                    self.entities[j].trade_returning = false;
+                    self.entities[i].food += loot_food;
+                    self.entities[i].wood += loot_wood;
                     self.deaths_combat += 1;
                     if let Some(ci) = self.clan_index(attacker_clan) {
                         self.clans[ci].stats.kills += 1;
@@ -2898,6 +3282,12 @@ impl World {
         let members = std::mem::take(&mut self.clans[ci].members);
         for mid in members {
             if let Some(mi) = self.entity_index(mid) {
+                self.entities[mi].food += self.entities[mi].trade_food;
+                self.entities[mi].wood += self.entities[mi].trade_wood;
+                self.entities[mi].trade_target_clan = -1;
+                self.entities[mi].trade_returning = false;
+                self.entities[mi].trade_food = 0;
+                self.entities[mi].trade_wood = 0;
                 self.entities[mi].clan = -1;
             }
         }
@@ -3174,6 +3564,24 @@ fn road_cost_saved_milli(t: u8) -> u64 {
     }
 }
 
+fn route_distance_sq(point: (i32, i32), start: (i32, i32), end: (i32, i32)) -> i64 {
+    let vx = (end.0 - start.0) as i64;
+    let vy = (end.1 - start.1) as i64;
+    let wx = (point.0 - start.0) as i64;
+    let wy = (point.1 - start.1) as i64;
+    let length_sq = vx * vx + vy * vy;
+    if length_sq == 0 {
+        return wx * wx + wy * wy;
+    }
+    let scale = 1024i64;
+    let t = ((wx * vx + wy * vy) * scale / length_sq).clamp(0, scale);
+    let projected_x = start.0 as i64 * scale + vx * t;
+    let projected_y = start.1 as i64 * scale + vy * t;
+    let dx = point.0 as i64 * scale - projected_x;
+    let dy = point.1 as i64 * scale - projected_y;
+    (dx * dx + dy * dy) / (scale * scale)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3216,7 +3624,31 @@ mod tests {
             for _ in 0..3000 {
                 w.step();
             }
-            (w.population(), w.deaths_starved, w.deaths_combat)
+            let trade_deliveries = w
+                .clans
+                .iter()
+                .map(|clan| clan.stats.trade_deliveries)
+                .sum::<u32>();
+            let relationships: Vec<(i32, i32, u32, u32)> = w
+                .diplomacy
+                .relationships()
+                .iter()
+                .map(|relation| {
+                    (
+                        relation.clan_low,
+                        relation.clan_high,
+                        relation.trust.to_bits(),
+                        (relation.recent_food_delivered + relation.recent_wood_delivered).to_bits(),
+                    )
+                })
+                .collect();
+            (
+                w.population(),
+                w.deaths_starved,
+                w.deaths_combat,
+                trade_deliveries,
+                relationships,
+            )
         };
         assert_eq!(run(), run(), "same seed must produce identical runs");
     }
@@ -3470,6 +3902,322 @@ mod tests {
         assert!(w.grid.road.iter().all(|&v| v == 0));
         assert!(w.grid.wood.iter().all(|&v| v == 0));
         assert!(w.grid.traffic.iter().all(|&v| v == 0));
+    }
+
+    #[test]
+    fn trade_loads_only_true_surplus_and_ablation_moves_nothing() {
+        let (mut world, donor, _, donor_idx, _) = trade_test_world();
+        let pop = world.clan_roster_size(donor_idx);
+        let food_floor = pop * TRADE_FOOD_FLOOR_PER_MEMBER;
+        world.clans[donor_idx].food = food_floor + 5;
+        world.clans[donor_idx].wood = TRADE_WOOD_FLOOR + 2;
+        let mut entities = std::mem::take(&mut world.entities);
+        world.rebuild_occupancy(&entities);
+        let mut courier = entities.remove(donor);
+        world.entities = entities;
+        assert!(world.handle_trade(&mut courier, donor_idx));
+        assert_eq!(courier.trade_food, TRADE_FOOD_LOAD);
+        assert_eq!(courier.trade_wood, TRADE_WOOD_LOAD);
+        assert!(world.clans[donor_idx].food >= food_floor);
+        assert!(world.clans[donor_idx].wood >= TRADE_WOOD_FLOOR);
+
+        world.cancel_trade(&mut courier, donor_idx);
+        world.params.community_trade = false;
+        let food = world.clans[donor_idx].food;
+        let wood = world.clans[donor_idx].wood;
+        assert!(!world.handle_trade(&mut courier, donor_idx));
+        assert_eq!(world.clans[donor_idx].food, food);
+        assert_eq!(world.clans[donor_idx].wood, wood);
+        assert_eq!(courier.trade_target_clan, -1);
+    }
+
+    #[test]
+    fn trade_partner_ties_are_resolved_by_stable_clan_id() {
+        let mut world = World::new(40, 0x71E);
+        world.populate(0, 0, 3);
+        world.tick = TRADE_REFRESH_INTERVAL;
+        world.clans[0].stockpile = Some((10, 10));
+        world.clans[1].stockpile = Some((8, 10));
+        world.clans[2].stockpile = Some((12, 10));
+        world.refresh_diplomacy();
+        assert_eq!(world.clans[0].trade_partner, Some(world.clans[1].id));
+    }
+
+    #[test]
+    fn trade_cargo_changes_ownership_only_after_physical_delivery() {
+        let (mut world, donor, _, donor_idx, recipient_idx) = trade_test_world();
+        let recipient_food = world.clans[recipient_idx].food;
+        let recipient_wood = world.clans[recipient_idx].wood;
+        let mut entities = std::mem::take(&mut world.entities);
+        world.rebuild_occupancy(&entities);
+        let mut courier = entities.remove(donor);
+        world.entities = entities;
+        assert!(world.handle_trade(&mut courier, donor_idx));
+        assert_eq!(world.clans[recipient_idx].food, recipient_food);
+        assert_eq!(world.clans[recipient_idx].wood, recipient_wood);
+
+        for _ in 0..20 {
+            courier.move_budget += 1.0;
+            world.handle_trade(&mut courier, donor_idx);
+            if courier.trade_target_clan < 0 {
+                break;
+            }
+        }
+        assert_eq!(courier.trade_target_clan, -1);
+        assert_eq!(
+            world.clans[recipient_idx].food,
+            recipient_food + TRADE_FOOD_LOAD
+        );
+        assert_eq!(
+            world.clans[recipient_idx].wood,
+            recipient_wood + TRADE_WOOD_LOAD
+        );
+        assert_eq!(
+            world.clans[donor_idx].stats.trade_food_sent,
+            TRADE_FOOD_LOAD as u32
+        );
+        assert_eq!(
+            world.clans[recipient_idx].stats.trade_food_received,
+            TRADE_FOOD_LOAD as u32
+        );
+        assert_eq!(world.clans[donor_idx].stats.trade_deliveries, 1);
+        let relation = world
+            .diplomacy
+            .lookup(world.clans[donor_idx].id, world.clans[recipient_idx].id)
+            .expect("delivery creates relationship memory");
+        assert!(relation.trust > 0.0);
+        assert_eq!(relation.last_trade_tick, Some(world.tick));
+    }
+
+    #[test]
+    fn diplomacy_requires_repeated_physical_aid_before_a_pact() {
+        let (mut world, donor, _, donor_idx, recipient_idx) = trade_test_world();
+        let donor_id = world.clans[donor_idx].id;
+        let recipient_id = world.clans[recipient_idx].id;
+        world.clans[donor_idx].food += 20;
+        world.clans[donor_idx].wood += 20;
+        world.clans[recipient_idx].food = 0;
+        world.clans[recipient_idx].wood = 0;
+        let mut entities = std::mem::take(&mut world.entities);
+        world.rebuild_occupancy(&entities);
+        let mut courier = entities.remove(donor);
+        world.entities = entities;
+
+        for delivery in 1..=3 {
+            (courier.x, courier.y) = world.clans[donor_idx].stockpile.unwrap();
+            assert!(world.handle_trade(&mut courier, donor_idx));
+            let destination = world.clans[recipient_idx].stockpile.unwrap();
+            (courier.x, courier.y) = (destination.0 - 1, destination.1);
+            assert!(world.handle_trade(&mut courier, donor_idx));
+            assert!(courier.trade_returning);
+            assert_eq!(
+                world.are_allied(donor_id, recipient_id),
+                delivery >= 3,
+                "a pact must follow repeated delivered aid"
+            );
+            (courier.x, courier.y) = world.clans[donor_idx].stockpile.unwrap();
+            assert!(world.handle_trade(&mut courier, donor_idx));
+            assert_eq!(courier.trade_target_clan, -1);
+        }
+    }
+
+    #[test]
+    fn starvation_refunds_dedicated_trade_cargo() {
+        let (mut world, donor, _, donor_idx, _) = trade_test_world();
+        let mut courier = world.entities.remove(donor);
+        assert!(world.handle_trade(&mut courier, donor_idx));
+        let cargo = courier.trade_food + courier.trade_wood;
+        world.clans[donor_idx].food = 0;
+        world.clans[donor_idx].wood = 0;
+        world.grid.pellet.fill(0);
+        world.pellet_total = 0;
+        world.params.starve_ticks = 1;
+        world.params.starve_damage = 10.0;
+        courier.ticks_since_food = 1;
+        courier.health = 1.0;
+
+        world.update_entity(&mut courier);
+
+        assert!(courier.dead);
+        assert_eq!(courier.trade_target_clan, -1);
+        assert_eq!(
+            world.clans[donor_idx].food + world.clans[donor_idx].wood,
+            cargo
+        );
+    }
+
+    #[test]
+    fn trade_ablation_disables_existing_pacts_immediately() {
+        let (mut world, _, _, donor_idx, recipient_idx) = trade_test_world();
+        let donor_id = world.clans[donor_idx].id;
+        let recipient_id = world.clans[recipient_idx].id;
+        world
+            .diplomacy
+            .set_pact(donor_id, recipient_id, world.tick + 1000);
+        assert!(world.are_allied(donor_id, recipient_id));
+
+        world.params.community_trade = false;
+        assert!(!world.are_allied(donor_id, recipient_id));
+        world.refresh_diplomacy();
+        assert!(world.clans.iter().all(|clan| clan.trade_partner.is_none()));
+        assert!(world
+            .clans
+            .iter()
+            .all(|clan| clan.trade_route_threat.is_none()));
+    }
+
+    #[test]
+    fn invited_courier_has_narrow_passage_before_an_alliance() {
+        let (mut world, courier, recipient, donor_idx, recipient_idx) = trade_test_world();
+        world.params.community_care = false;
+        world.params.clan_grace_ticks = 0;
+        world.params.war_threshold = 10.0;
+        (world.entities[courier].x, world.entities[courier].y) = (20, 20);
+        world.entities[courier].goal = Goal::Starving;
+        world.entities[courier].trade_target_clan = world.clans[recipient_idx].id;
+        world.entities[courier].trade_food = 1;
+        (world.entities[recipient].x, world.entities[recipient].y) = (21, 20);
+        world.entities[recipient].work_role = ClanMode::Defend;
+        let tile = world.grid.idx(20, 20);
+        world.grid.owner[tile] = world.clans[recipient_idx].id;
+        let before = world.entities[courier].health;
+
+        assert!(!world.are_allied(world.clans[donor_idx].id, world.clans[recipient_idx].id));
+        world.resolve_combat();
+
+        assert_eq!(world.entities[courier].health, before);
+    }
+
+    #[test]
+    fn route_guards_ignore_passers_and_can_engage_actual_attackers() {
+        let mut world = World::new(40, 0x6A2D);
+        world.populate(0, 0, 3);
+        world.tick = TRADE_REFRESH_INTERVAL;
+        world.params.war_threshold = 10.0;
+        world.clans[0].stockpile = Some((5, 5));
+        world.clans[1].stockpile = Some((15, 5));
+        world.clans[2].stockpile = Some((32, 32));
+        let guard = world
+            .entities
+            .iter()
+            .position(|entity| entity.clan == world.clans[0].id && !entity.is_leader)
+            .unwrap();
+        let attacker = world
+            .entities
+            .iter()
+            .position(|entity| entity.clan == world.clans[2].id && !entity.is_leader)
+            .unwrap();
+        let bystander = world
+            .entities
+            .iter()
+            .position(|entity| {
+                entity.clan == world.clans[2].id
+                    && !entity.is_leader
+                    && entity.id != world.entities[attacker].id
+            })
+            .unwrap();
+        (world.entities[guard].x, world.entities[guard].y) = (9, 5);
+        world.entities[guard].work_role = ClanMode::Defend;
+        (world.entities[attacker].x, world.entities[attacker].y) = (10, 5);
+        world.entities[attacker].work_role = ClanMode::Gather;
+
+        world.refresh_diplomacy();
+        assert_eq!(world.clans[0].trade_route_threat, None);
+
+        world.entities[attacker].work_role = ClanMode::Attack;
+        world.refresh_diplomacy();
+        assert_eq!(
+            world.clans[0].trade_route_threat,
+            Some(world.entities[attacker].id)
+        );
+        (world.entities[attacker].x, world.entities[attacker].y) = (25, 25);
+        (world.entities[bystander].x, world.entities[bystander].y) = (10, 5);
+        world.entities[bystander].work_role = ClanMode::Gather;
+        let bystander_health = world.entities[bystander].health;
+        world.resolve_combat();
+        assert_eq!(world.entities[bystander].health, bystander_health);
+
+        (world.entities[attacker].x, world.entities[attacker].y) = (10, 5);
+        (world.entities[bystander].x, world.entities[bystander].y) = (25, 24);
+        world.entities[guard].attack_cooldown = 0;
+        let before = world.entities[attacker].health;
+        world.resolve_combat();
+        assert!(world.entities[attacker].health < before);
+    }
+
+    #[test]
+    fn allied_passage_suppresses_combat_but_not_foreign_harvesting() {
+        let (mut world, donor, recipient, donor_idx, recipient_idx) = trade_test_world();
+        world.params.community_care = false;
+        world.params.clan_grace_ticks = 0;
+        world.params.war_threshold = 0.0;
+        world.entities[donor].x = 20;
+        world.entities[donor].y = 20;
+        world.entities[donor].work_role = ClanMode::Attack;
+        world.entities[recipient].x = 21;
+        world.entities[recipient].y = 20;
+        world.entities[recipient].work_role = ClanMode::Attack;
+        let donor_health = world.entities[donor].health;
+        let recipient_health = world.entities[recipient].health;
+        world.diplomacy.adjust(
+            world.clans[donor_idx].id,
+            world.clans[recipient_idx].id,
+            1.0,
+        );
+        world.resolve_combat();
+        assert_eq!(world.entities[donor].health, donor_health);
+        assert_eq!(world.entities[recipient].health, recipient_health);
+
+        let tile = world.grid.idx(20, 20);
+        world.grid.owner[tile] = world.clans[recipient_idx].id;
+        world.grid.pellet[tile] = 1;
+        world.pellet_total += 1;
+        let mut outsider = world.entities.remove(donor);
+        outsider.ticks_since_food = 0;
+        assert!(!world.consume_pellet_at(&mut outsider, false));
+        assert_eq!(world.grid.pellet[tile], 1);
+    }
+
+    fn trade_test_world() -> (World, usize, usize, usize, usize) {
+        let mut world = World::new(40, 0x7ADE);
+        world.populate(0, 0, 2);
+        world.tick = TRADE_REFRESH_INTERVAL;
+        let donor_idx = 0;
+        let recipient_idx = 1;
+        let donor_id = world.clans[donor_idx].id;
+        let recipient_id = world.clans[recipient_idx].id;
+        let donor = world
+            .entities
+            .iter()
+            .position(|entity| entity.clan == donor_id && !entity.is_leader)
+            .expect("donor courier");
+        let recipient = world
+            .entities
+            .iter()
+            .position(|entity| entity.clan == recipient_id && !entity.is_leader)
+            .expect("recipient member");
+        world.clans[donor_idx].stockpile = Some((8, 8));
+        world.clans[recipient_idx].stockpile = Some((14, 8));
+        world.clans[donor_idx].trade_partner = Some(recipient_id);
+        world.clans[recipient_idx].trade_partner = Some(donor_id);
+        for x in 8..=14 {
+            let i = world.grid.idx(x, 8);
+            world.grid.terrain[i] = terrain::PLAINS;
+        }
+        for (index, entity) in world.entities.iter_mut().enumerate() {
+            entity.x = 2 + index as i32;
+            entity.y = 30;
+        }
+        world.entities[donor].x = 8;
+        world.entities[donor].y = 8;
+        world.entities[donor].speed = 1.0;
+        world.entities[donor].work_role = ClanMode::Gather;
+        world.entities[recipient].x = 14;
+        world.entities[recipient].y = 9;
+        let pop = world.clan_roster_size(donor_idx);
+        world.clans[donor_idx].food = pop * TRADE_FOOD_FLOOR_PER_MEMBER + 5;
+        world.clans[donor_idx].wood = TRADE_WOOD_FLOOR + 2;
+        (world, donor, recipient, donor_idx, recipient_idx)
     }
 
     #[test]

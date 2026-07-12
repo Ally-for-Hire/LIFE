@@ -317,10 +317,34 @@ preserved 1.000 robust survival, 0.929 security, and +0.009 fairness but produce
 no clan-member wound opportunities; deterministic forced-combat tests therefore
 carry the causal evidence for assignment, transport, recovery, bleed-out, and loot.
 
+### A19 — Trade/Diplomacy V1
+
+Clans now keep deterministic symmetric relationship memory in a sorted ledger.
+Gather couriers load no more than two food/one wood above an eight-food-per-member
+and six-wood donor floor only when the partner is poorer, physically travel to the
+partner stockpile, and build trust only after delivery. Nine delivered material
+establishes a temporary pact. Pacts/trust suppress allied combat, raiding, trespass
+targeting, and movement avoidance without permitting foreign farm harvest. Defend
+workers cache and answer threats near active routes. Inputs 22–24 now expose
+relation, partner count, and recent delivered volume while preserving `LFB1`.
+
+The first integrated suite caught a reserved-input compatibility regression:
+feeding 0.5 for "no partner" changed the tracked champion and broke the strict
+logistics security gate. Restoring zero until a real relationship exists fixed the
+old contract. Independent review also caught premature peace, starvation cargo
+loss, incomplete ablation, passive route targeting, hollow promotion gates, and
+missing trade-context routing probes; final re-review also led to narrow invited-
+courier return passage and hostile-entity route targeting. Each issue now has a
+focused regression test or promotion gate. The final 13-world trade pair preserves
+1.000 survival and +0.010 fairness; enabled/disabled security is 0.932/0.936,
+and enabled worlds deliver 6.3 food plus 3.8 wood in 5.8 completed trips versus zero in the control.
+The release suite passes 52 tests with one ignored marathon.
+
 ## Open ideas / next
 
-- **Diplomacy / trade:** friendly clans exchange food; relationship memory; a
-  second resource (wood/stone) to make holding *connected, varied* land valuable.
+- **Full-world save/load:** versioned, validated persistence with exact RNG continuation.
+- **Buildings, technology, and equipment:** resource-backed settlement progression
+  that preserves the fixed champion brain contract.
 - **More sub-minds / deeper hierarchy:** specialist nets for diplomacy, logistics;
   a meta-gate over gates.
 - **Live-world continuous evolution without violence:** cultural imitation so

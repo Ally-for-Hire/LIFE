@@ -79,6 +79,7 @@ validation switch:
 | --- | --- | --- |
 | `community_logistics` | true | enables wood jobs, protected reserves, road construction, and road movement savings; false is the paired infrastructure-disabled ablation |
 | `community_care` | true | enables combat incapacitation, Gather/Defend rescue, physical evacuation, and recovery; false keeps immediate combat death |
+| `community_trade` | true | enables relationship memory, temporary pacts, physical food/wood couriers, allied passage, and route defense; false is the no-trade control |
 
 Disabling logistics does not erase existing road cells, which keeps world state
 and rendering comparable. Those roads provide **no movement-cost benefit** while
@@ -112,6 +113,13 @@ Community Care uses a 240-tick rescue window, 12-cell assignment radius, and 35%
 revival health. Input 28 now reports normalized roster health. These mechanics add
 runtime entity/clan state but do not change the fixed brain dimensions or `LFB1`
 champion format.
+
+Trade V1 uses fixed safety/flow constants: 60-cell partner range, 720-tick pact,
+nine delivered material before pact creation, 0.15 allied-trust threshold, eight
+food per roster member plus six wood retained before need-directed donation, and
+maximum courier loads of two food/one wood. Inputs 22–24 now
+carry relation, partner count, and recent delivered volume; existing brain files
+remain dimension-compatible.
 
 ## Terrain (applies on Populate)
 

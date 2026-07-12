@@ -18,6 +18,8 @@ pub enum Goal {
     BuildingRoad,
     Incapacitated,
     Rescuing,
+    Trading,
+    GuardingTrade,
     Fighting,
     Recruiting,
     Defending,
@@ -38,6 +40,8 @@ impl Goal {
             Goal::BuildingRoad => "building a road",
             Goal::Incapacitated => "incapacitated",
             Goal::Rescuing => "rescuing a clanmate",
+            Goal::Trading => "delivering inter-clan aid",
+            Goal::GuardingTrade => "guarding a trade route",
             Goal::Fighting => "fighting",
             Goal::Recruiting => "recruiting",
             Goal::Defending => "defending",
@@ -85,6 +89,12 @@ pub struct Entity {
     pub rescue_target: Option<u32>,
     /// Rescuer physically carrying this incapacitated member toward home.
     pub carried_by: Option<u32>,
+    /// Partner clan and dedicated cargo for a persistent trade delivery.
+    pub trade_target_clan: i32,
+    /// Delivery completed; courier is physically returning home under passage.
+    pub trade_returning: bool,
+    pub trade_food: i32,
+    pub trade_wood: i32,
     pub dead: bool,
 }
 

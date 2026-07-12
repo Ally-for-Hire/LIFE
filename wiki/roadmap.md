@@ -46,30 +46,29 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
   throughput, real road member-steps, and measured movement-cost savings replace
   road-building activity as the evidence needed for causal comparison.
 - **Guarded Retraining V1.2** — marathon champion promotion is fail-closed behind
-  fixed-world quality and paired logistics gates, preserving survival, food
+  fixed-world quality plus paired logistics/trade gates, preserving survival, food
   security, clan fairness, routing health, transport value, and reserve behavior.
 - **Community Care V1** — lethal combat creates a bounded rescue window;
   Gather/Defend workers physically carry casualties home, while inactive patients
   are excluded from work, reproduction, hostility, and survival metrics.
+- **Trade/Diplomacy V1** — stable symmetric relationship memory, temporary pacts,
+  survival-buffered physical food/wood delivery, allied passage, route defense,
+  causal counters, and a paired no-trade benchmark.
 
 ## Next (civ layers)
 
+- **Save / load** — persist and validate a complete deterministic world. Champion
+  brain persistence already exists separately.
 - **Buildings + tech tree** — houses, granaries, walls, barracks, markets with
-  footprints, HP, and production; new brain build/research actions and sub-minds.
-- **Trade & diplomacy** — friendly clans exchange food/resources; a second
-  resource so holding *connected, varied* land matters; relationship memory.
+  footprints, HP, and production; reuse fixed policy roles/inputs so `LFB1` remains valid.
 - **Weapons / military** — equipment from resources + tech that boosts
   attack/defense; brains learn to arm before war.
-- **Save / load** — persist a full world. Champion brain persistence already
-  exists; a `(seed, params)` pair also reproduces a run.
 
 ## Engineering notes
 
 - **Spatial index** — combat and target search currently rebuild a per-tick
   occupancy hashmap and do bounded scans. If populations grow large, switch to a
   cell-bucketed spatial hash for neighbor queries.
-- **Save / load** — persist complete world state to disk; champion brains are
-  already serialized and the tracked `champion.bin` is regression-tested.
 - **Quality diversity** — the five-niche archive is intentionally compact. Add
   richer behavior descriptors only when new economy/diplomacy mechanics create
   genuinely distinct strategic axes.

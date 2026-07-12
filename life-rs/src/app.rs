@@ -688,6 +688,19 @@ impl eframe::App for LifeApp {
                             );
                             ui.label(format!("carried food: {}", e.food));
                             ui.label(format!("carried wood: {}", e.wood));
+                            if e.trade_target_clan >= 0 {
+                                if e.trade_returning {
+                                    ui.label(format!(
+                                        "trade courier: returning from clan {}",
+                                        e.trade_target_clan
+                                    ));
+                                } else {
+                                    ui.label(format!(
+                                        "trade cargo: {} food / {} wood → clan {}",
+                                        e.trade_food, e.trade_wood, e.trade_target_clan
+                                    ));
+                                }
+                            }
                             ui.label(format!("speed: {:.2} cells/tick", e.speed));
                             ui.label(format!("position: {}, {}", e.x, e.y));
 
@@ -716,6 +729,22 @@ impl eframe::App for LifeApp {
                                 } else {
                                     "community care: disabled (ablation)"
                                 });
+                                ui.label(if self.world.params.community_trade {
+                                    "trade and diplomacy: enabled"
+                                } else {
+                                    "trade and diplomacy: disabled (ablation)"
+                                });
+                                if let Some(partner) = c.trade_partner {
+                                    let trust = self
+                                        .world
+                                        .diplomacy
+                                        .lookup(c.id, partner)
+                                        .map_or(0.0, |relation| relation.trust);
+                                    ui.label(format!(
+                                        "trade partner: clan {} · trust {:+.2}",
+                                        partner, trust
+                                    ));
+                                }
                                 ui.label(format!("territory: {} tiles", c.territory));
                                 ui.label(format!("aggression: {:.2}", c.aggression));
                                 ui.label(format!(
@@ -756,6 +785,14 @@ impl eframe::App for LifeApp {
                                     c.stats.rescues,
                                     c.stats.incapacitations,
                                     c.stats.bleedouts
+                                ));
+                                ui.label(format!(
+                                    "trade: sent {}f/{}w · received {}f/{}w · {} deliveries",
+                                    c.stats.trade_food_sent,
+                                    c.stats.trade_wood_sent,
+                                    c.stats.trade_food_received,
+                                    c.stats.trade_wood_received,
+                                    c.stats.trade_deliveries
                                 ));
                                 ui.add_space(2.0);
                                 ui.label(
@@ -1017,6 +1054,9 @@ impl eframe::App for LifeApp {
                             ui.end_row();
                             ui.label("community care");
                             ui.label(format!("{:.0}%", t.mean_care * 100.0));
+                            ui.end_row();
+                            ui.label("delivered trade");
+                            ui.label(format!("{:.0}%", t.mean_trade * 100.0));
                             ui.end_row();
                             ui.label("clan fairness floor");
                             ui.label(format!("{:+.0}%", t.fairness_margin * 100.0));
@@ -1354,6 +1394,21 @@ fn params_ui(ui: &mut egui::Ui, p: &mut Params, tps: f32) {
                     "nearby gatherers and defenders evacuate incapacitated clanmates before bleed-out"
                 } else {
                     "causal ablation: lethal combat causes immediate death and no rescue response"
+                })
+                .small()
+                .weak(),
+            );
+        });
+
+    egui::CollapsingHeader::new("Trade and diplomacy")
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.checkbox(&mut p.community_trade, "enable Trade/Diplomacy V1");
+            ui.label(
+                egui::RichText::new(if p.community_trade {
+                    "surplus food and wood travel physically between temporary partners; delivery builds trust and route defense"
+                } else {
+                    "causal ablation: no pacts, couriers, exchange, or allied passage"
                 })
                 .small()
                 .weak(),

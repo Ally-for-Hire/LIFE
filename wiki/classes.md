@@ -13,6 +13,7 @@ The single source of truth and the per-tick simulation.
 | `entities: Vec<Entity>` | every NPC |
 | `trees: Vec<Tree>` | persistent food sources |
 | `clans: Vec<Clan>` | active clans |
+| `diplomacy: DiplomacyLedger` | sorted symmetric trust, pacts, and delivered-volume memory |
 | `params: Params` | all live-tunable settings |
 | `rng: Rng` | this world's deterministic PRNG |
 | `deaths_starved` / `deaths_combat` / `births` | population counters |
@@ -47,7 +48,8 @@ human-readable immediate intent shown in the inspector (including gathering or
 hauling food/wood, building roads, incapacitation, and rescue). Community Care
 adds a bleed-out deadline, attacker credit, and persistent rescuer/patient carrying
 links. Hunger, rescue, and immediate defense may override the assigned role without
-erasing it.
+erasing it. Trade adds a persistent partner id, return-state flag, and dedicated
+food/wood cargo, so role changes cannot duplicate or abandon an in-flight delivery.
 
 ## `Clan` + `ClanMode` (`clan.rs`)
 
@@ -62,7 +64,15 @@ deposits/releases, plus V1.1 `food_delivered`, `road_steps`, and
 `road_cost_saved_milli` causal counters and V1 care incapacitation/rescue/bleed-out
 counters). `ClanMode` is one of Gather / Recruit / Expand / Defend /
 Attack / Scout; `mode` is now the headline order while members can simultaneously
-hold different roles.
+hold different roles. Trade adds a cached partner, hostile entity id for route
+defense, and delivered food/wood counters.
+
+## `DiplomacyLedger` + `Relationship` (`diplomacy.rs`)
+
+A sorted `Vec` of canonical `(low clan id, high clan id)` pairs. Lookup is
+symmetric and deterministic; each record keeps clamped trust, optional pact
+expiry, decaying delivered food/wood volume, and the last completed trade tick.
+Offers cannot create delivery evidence, and pruning removes disbanded clans.
 
 ## `Brain` (`brain.rs`)
 

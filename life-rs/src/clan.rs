@@ -78,6 +78,12 @@ pub struct ClanStats {
     pub incapacitations: u32,
     pub rescues: u32,
     pub bleedouts: u32,
+    /// Causal inter-clan exchange counters; offers do not count until delivery.
+    pub trade_food_sent: u32,
+    pub trade_food_received: u32,
+    pub trade_wood_sent: u32,
+    pub trade_wood_received: u32,
+    pub trade_deliveries: u32,
     /// Member-ticks by assigned role (output order from `Brain`).
     pub role_tick_sum: [u64; N_MODES],
 }
@@ -115,6 +121,9 @@ pub struct Clan {
     pub expand_target: Option<(i32, i32)>,
     /// Nearest non-member standing on this clan's territory (to hunt & kill).
     pub trespasser_pos: Option<(i32, i32)>,
+    /// Current aid partner and nearest hostile threatening that route.
+    pub trade_partner: Option<i32>,
+    pub trade_route_threat: Option<u32>,
     /// Tick of the clan's last territory claim (for the claim rate limit).
     pub last_claim_tick: i32,
     pub stats: ClanStats,
@@ -144,6 +153,8 @@ impl Clan {
             neutral_pos: None,
             expand_target: None,
             trespasser_pos: None,
+            trade_partner: None,
+            trade_route_threat: None,
             last_claim_tick: -100000,
             stats: ClanStats {
                 founded_tick,

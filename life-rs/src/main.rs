@@ -10,6 +10,7 @@ mod brain;
 mod clan;
 #[cfg(test)]
 mod diag;
+mod diplomacy;
 mod entity;
 mod grid;
 mod quality;
