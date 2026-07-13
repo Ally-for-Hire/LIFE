@@ -14,7 +14,7 @@ The single source of truth and the per-tick simulation.
 | `trees: Vec<Tree>` | persistent food sources |
 | `clans: Vec<Clan>` | active clans |
 | `diplomacy: DiplomacyLedger` | sorted symmetric trust, pacts, and delivered-volume memory |
-| `buildings` / `building_cells` | physical settlement sites plus their one-cell footprint lookup |
+| `buildings` / `building_cells` | physical settlement sites plus their canonical reserved 3x3 footprints |
 | `settlements` | sorted per-clan technology, active project, and causal public-good counters |
 | `community_settlement` | live Buildings/Technology treatment/ablation switch |
 | `ore_deposits` / `ore_cargo` | stable finite deposits and sorted physical entity cargo |

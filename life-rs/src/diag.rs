@@ -280,6 +280,7 @@ fn diag_trained() {
 ///   LIFE_TRAIN_HOURS=8 cargo test --release train_marathon -- --ignored --nocapture
 /// Saves the champion to `champion.bin` (which the app auto-loads) and appends a
 /// per-generation log to `training-log.txt`. Continues from an existing champion.
+/// Set `LIFE_TRAIN_CHAMPION` and `LIFE_TRAIN_LOG` for an isolated diagnostic run.
 #[test]
 #[ignore]
 fn train_marathon() {
@@ -288,6 +289,10 @@ fn train_marathon() {
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(8.0);
+    let champion_path =
+        std::env::var("LIFE_TRAIN_CHAMPION").unwrap_or_else(|_| CHAMPION_PATH.to_owned());
+    let log_path =
+        std::env::var("LIFE_TRAIN_LOG").unwrap_or_else(|_| "training-log.txt".to_owned());
     // Use every logical core for the arenas (the test harness doesn't call the
     // app's rayon setup, so configure the global pool explicitly here).
     let cores = std::thread::available_parallelism()
@@ -307,8 +312,8 @@ fn train_marathon() {
     cfg.repeats = 4;
     cfg.world_size = 130;
     cfg.elite = 8;
-    println!("marathon: {hours}h → {CHAMPION_PATH} (log: training-log.txt)");
-    train_marathon(hours, cfg, CHAMPION_PATH, "training-log.txt");
+    println!("marathon: {hours}h → {champion_path} (log: {log_path})");
+    train_marathon(hours, cfg, &champion_path, &log_path);
 }
 
 /// Drop the *saved marathon champion* (`champion.bin`) into a live-default world

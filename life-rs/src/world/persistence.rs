@@ -5,7 +5,7 @@
 //! incompatible field-layout change must introduce a new envelope version and
 //! an explicit migration instead of silently reinterpreting V1 bytes.
 
-use super::{Params, Tree, World};
+use super::{building_footprint_cells, GroundLoot, Params, Tree, World, MAX_ENTITIES_PER_CELL};
 use crate::brain::Brain;
 use crate::clan::Clan;
 use crate::diplomacy::DiplomacyLedger;
@@ -27,6 +27,7 @@ const MAGIC: &[u8; 8] = b"LIFEWRLD";
 const VERSION_V1: u16 = 1;
 const VERSION_V2: u16 = 2;
 const VERSION_V3: u16 = 3;
+const VERSION_V4: u16 = 4;
 const HEADER_LEN: usize = 24;
 const MAX_PAYLOAD_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_GRID_SIZE: i32 = 4096;
@@ -73,16 +74,27 @@ struct WorldSnapshotV3 {
     community_military: bool,
     next_ore_deposit_id: u32,
 }
+#[derive(Serialize, Deserialize)]
+struct WorldSnapshotV4 {
+    base: WorldSnapshotV3,
+    ground_loot: Vec<GroundLoot>,
+}
+
+#[derive(Clone, Copy)]
+enum BuildingLayerLayout {
+    LegacyAnchor,
+    CurrentFootprint,
+}
 
 impl World {
     /// Atomically writes a validated, versioned snapshot of every persistent
     /// world field. Scratch flood-fill and occupancy buffers are rebuilt after
     /// load and intentionally do not appear in the wire format.
     pub fn save_file(&self, path: impl AsRef<Path>) -> io::Result<()> {
-        let snapshot = WorldSnapshotV3::capture(self);
+        let snapshot = WorldSnapshotV4::capture(self);
         snapshot.validate()?;
         let payload = encode_snapshot(&snapshot)?;
-        write_envelope(path.as_ref(), VERSION_V3, &payload)
+        write_envelope(path.as_ref(), VERSION_V4, &payload)
     }
 
     /// Loads and validates a full-world snapshot. The returned world owns the
@@ -93,15 +105,20 @@ impl World {
             VERSION_V1 => {
                 let snapshot: WorldSnapshotV1 = decode_snapshot(&payload, "V1")?;
                 snapshot.validate()?;
-                Ok(snapshot.restore())
+                restore_legacy_world(snapshot.restore())
             }
             VERSION_V2 => {
                 let snapshot: WorldSnapshotV2 = decode_snapshot(&payload, "V2")?;
                 snapshot.validate()?;
-                Ok(snapshot.restore())
+                restore_legacy_world(snapshot.restore())
             }
             VERSION_V3 => {
                 let snapshot: WorldSnapshotV3 = decode_snapshot(&payload, "V3")?;
+                snapshot.validate()?;
+                restore_legacy_world(snapshot.restore())
+            }
+            VERSION_V4 => {
+                let snapshot: WorldSnapshotV4 = decode_snapshot(&payload, "V4")?;
                 snapshot.validate()?;
                 Ok(snapshot.restore())
             }
@@ -153,6 +170,7 @@ impl WorldSnapshotV1 {
             ore_cargo: Vec::new(),
             militaries: Vec::new(),
             equipment: Vec::new(),
+            ground_loot: Vec::new(),
             community_military: true,
             next_entity_id: self.next_entity_id,
             next_clan_id: self.next_clan_id,
@@ -434,11 +452,16 @@ impl WorldSnapshotV2 {
         world.settlements = self.settlements;
         world.community_settlement = self.community_settlement;
         world.next_building_id = self.next_building_id;
+        world.rebuild_building_footprints();
         world.initialize_military_resources();
         world
     }
 
     fn validate(&self) -> io::Result<()> {
+        self.validate_with_layout(BuildingLayerLayout::LegacyAnchor)
+    }
+
+    fn validate_with_layout(&self, layout: BuildingLayerLayout) -> io::Result<()> {
         self.base.validate()?;
         let cells = self.base.grid.terrain.len();
         if self.building_cells.len() != cells {
@@ -454,7 +477,6 @@ impl WorldSnapshotV2 {
                 || !point_in_bounds(building.position(), self.base.grid.size)
                 || building.construction > building.kind.cost().work
                 || building.hp > building.kind.max_hp()
-                || self.building_cells[self.base.grid.idx(building.x, building.y)] != building.id.0
             {
                 return Err(invalid("invalid building state"));
             }
@@ -467,16 +489,9 @@ impl WorldSnapshotV2 {
         {
             return Err(invalid("next building id is not ahead of live ids"));
         }
-        for (cell, &id) in self.building_cells.iter().enumerate() {
-            if id == 0 {
-                continue;
-            }
-            let Some(building) = self.buildings.iter().find(|building| building.id.0 == id) else {
-                return Err(invalid("building layer references a missing building"));
-            };
-            if self.base.grid.idx(building.x, building.y) != cell {
-                return Err(invalid("building footprint does not match its position"));
-            }
+        match layout {
+            BuildingLayerLayout::LegacyAnchor => self.validate_legacy_building_layer()?,
+            BuildingLayerLayout::CurrentFootprint => self.validate_current_building_layer()?,
         }
         let mut previous = None;
         let mut targeted_buildings = HashSet::new();
@@ -518,6 +533,46 @@ impl WorldSnapshotV2 {
         }
         Ok(())
     }
+
+    fn validate_legacy_building_layer(&self) -> io::Result<()> {
+        for building in &self.buildings {
+            if self.building_cells[self.base.grid.idx(building.x, building.y)] != building.id.0 {
+                return Err(invalid("invalid building state"));
+            }
+        }
+        for (cell, &id) in self.building_cells.iter().enumerate() {
+            if id == 0 {
+                continue;
+            }
+            let Some(building) = self.buildings.iter().find(|building| building.id.0 == id) else {
+                return Err(invalid("building layer references a missing building"));
+            };
+            if self.base.grid.idx(building.x, building.y) != cell {
+                return Err(invalid("building footprint does not match its position"));
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_current_building_layer(&self) -> io::Result<()> {
+        let mut expected = vec![0u32; self.building_cells.len()];
+        for building in self
+            .buildings
+            .iter()
+            .filter(|building| !building.is_destroyed())
+        {
+            for (x, y) in building_footprint_cells(self.base.grid.size, building.x, building.y) {
+                let cell = self.base.grid.idx(x, y);
+                if expected[cell] == 0 || building.id.0 < expected[cell] {
+                    expected[cell] = building.id.0;
+                }
+            }
+        }
+        if self.building_cells != expected {
+            return Err(invalid("building footprint layer is not canonical"));
+        }
+        Ok(())
+    }
 }
 
 impl WorldSnapshotV3 {
@@ -545,7 +600,15 @@ impl WorldSnapshotV3 {
     }
 
     fn validate(&self) -> io::Result<()> {
-        self.base.validate()?;
+        self.validate_with_layout(BuildingLayerLayout::LegacyAnchor)
+    }
+
+    fn validate_current(&self) -> io::Result<()> {
+        self.validate_with_layout(BuildingLayerLayout::CurrentFootprint)
+    }
+
+    fn validate_with_layout(&self, layout: BuildingLayerLayout) -> io::Result<()> {
+        self.base.validate_with_layout(layout)?;
         let entity_clans: HashMap<u32, i32> = self
             .base
             .base
@@ -635,6 +698,65 @@ impl WorldSnapshotV3 {
         }
         Ok(())
     }
+}
+
+impl WorldSnapshotV4 {
+    fn capture(world: &World) -> Self {
+        Self {
+            base: WorldSnapshotV3::capture(world),
+            ground_loot: world.ground_loot.clone(),
+        }
+    }
+
+    fn restore(self) -> World {
+        let mut world = self.base.restore();
+        world.ground_loot = self.ground_loot;
+        world
+    }
+
+    fn validate(&self) -> io::Result<()> {
+        self.base.validate_current()?;
+        validate_entity_cell_capacity(
+            &self.base.base.base.entities,
+            self.base.base.base.grid.size,
+        )?;
+        let size = self.base.base.base.grid.size;
+        let mut previous = None;
+        for pile in &self.ground_loot {
+            let key = (pile.y, pile.x);
+            if !point_in_bounds((pile.x, pile.y), size)
+                || previous.is_some_and(|prior| prior >= key)
+                || pile.food < 0
+                || pile.wood < 0
+                || pile.food == 0 && pile.wood == 0 && pile.ore == 0
+            {
+                return Err(invalid("invalid ground loot state"));
+            }
+            previous = Some(key);
+        }
+        Ok(())
+    }
+}
+
+fn restore_legacy_world(mut world: World) -> io::Result<World> {
+    if !world.migrate_legacy_entity_cell_capacity() {
+        return Err(invalid(
+            "legacy world has more live entities than passable cell capacity",
+        ));
+    }
+    Ok(world)
+}
+
+fn validate_entity_cell_capacity(entities: &[Entity], size: i32) -> io::Result<()> {
+    let mut counts = vec![0u16; (size * size) as usize];
+    for entity in entities.iter().filter(|entity| !entity.dead) {
+        let cell = (entity.y * size + entity.x) as usize;
+        counts[cell] = counts[cell].saturating_add(1);
+        if counts[cell] > MAX_ENTITIES_PER_CELL {
+            return Err(invalid("entity cell capacity exceeded"));
+        }
+    }
+    Ok(())
 }
 
 fn validate_entity(entity: &Entity, size: i32) -> io::Result<()> {
@@ -852,6 +974,13 @@ mod tests {
             .diplomacy
             .record_trade(first_clan, second_clan, 7, 3, world.tick);
         world.champion = Some(Brain::random(&mut world.rng));
+        world.ground_loot.push(GroundLoot {
+            x: 3,
+            y: 4,
+            food: 7,
+            wood: 2,
+            ore: 5,
+        });
 
         world.save_file(&path).unwrap();
         let loaded = World::load_file(&path).unwrap();
@@ -965,7 +1094,7 @@ mod tests {
 
         representative_world().save_file(&path).unwrap();
         let mut bytes = std::fs::read(&path).unwrap();
-        bytes[8..10].copy_from_slice(&4u16.to_le_bytes());
+        bytes[8..10].copy_from_slice(&5u16.to_le_bytes());
         std::fs::write(&path, &bytes).unwrap();
         let error = World::load_file(&path).err().unwrap();
         assert!(error.to_string().contains("unsupported world version"));
@@ -1053,6 +1182,57 @@ mod tests {
     }
 
     #[test]
+    fn legacy_world_relocates_cell_overflow_deterministically() {
+        let path = test_path("legacy-cell-capacity");
+        let mut snapshot = WorldSnapshotV1::capture(&representative_world());
+        let target = (snapshot.entities[0].x, snapshot.entities[0].y);
+        for entity in snapshot.entities.iter_mut().take(4) {
+            (entity.x, entity.y) = target;
+        }
+        write_envelope(&path, VERSION_V1, &encode_snapshot(&snapshot).unwrap()).unwrap();
+
+        let first = World::load_file(&path).unwrap();
+        let second = World::load_file(&path).unwrap();
+        let positions = |world: &World| {
+            world
+                .entities
+                .iter()
+                .map(|entity| (entity.id, entity.x, entity.y))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(positions(&first), positions(&second));
+        let mut counts = HashMap::new();
+        for entity in first.entities.iter().filter(|entity| !entity.dead) {
+            *counts.entry((entity.x, entity.y)).or_insert(0usize) += 1;
+        }
+        assert!(counts
+            .values()
+            .all(|&count| count <= MAX_ENTITIES_PER_CELL as usize));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn v4_rejects_a_fourth_live_entity_in_one_cell() {
+        let path = test_path("v4-cell-capacity");
+        let mut snapshot = WorldSnapshotV4::capture(&representative_world());
+        let target = (
+            snapshot.base.base.base.entities[0].x,
+            snapshot.base.base.base.entities[0].y,
+        );
+        for entity in snapshot.base.base.base.entities.iter_mut().take(4) {
+            (entity.x, entity.y) = target;
+        }
+        write_envelope(&path, VERSION_V4, &encode_snapshot(&snapshot).unwrap()).unwrap();
+
+        assert!(World::load_file(&path)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("cell capacity"));
+        cleanup(&path);
+    }
+
+    #[test]
     fn v2_world_migrates_to_enabled_military_with_reachable_deposits() {
         let path = test_path("v2-migration");
         let original = representative_world();
@@ -1135,7 +1315,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_roundtrip_preserves_active_construction_and_research() {
+    fn v2_world_migrates_active_construction_to_physical_footprint() {
         let path = test_path("v2-settlement");
         let mut world = representative_world();
         world.buildings.clear();
@@ -1144,12 +1324,14 @@ mod tests {
         world.next_building_id = 1;
         let clan_id = world.clans[0].id;
         let stockpile = world.clans[0].stockpile.unwrap();
-        let cell = world.grid.idx(stockpile.0, stockpile.1);
+        let x = stockpile.0.clamp(1, world.grid.size - 2);
+        let y = stockpile.1.clamp(1, world.grid.size - 2);
+        let cell = world.grid.idx(x, y);
         let mut building = crate::settlement::Building::new(
             crate::settlement::BuildingId(world.next_building_id),
             clan_id,
-            stockpile.0,
-            stockpile.1,
+            x,
+            y,
             crate::settlement::BuildingKind::Workshop,
         );
         building.add_construction(17);
@@ -1171,10 +1353,32 @@ mod tests {
         world.settlements.sort_by_key(|state| state.clan_id);
         world.buildings.push(building);
 
-        world.save_file(&path).unwrap();
+        let snapshot = WorldSnapshotV2::capture(&world);
+        write_envelope(&path, VERSION_V2, &encode_snapshot(&snapshot).unwrap()).unwrap();
         let loaded = World::load_file(&path).unwrap();
 
-        assert_eq!(persistent_bytes(&world), persistent_bytes(&loaded));
+        assert_eq!(loaded.buildings[0].construction, 17);
+        assert_eq!(loaded.settlements[0].tech.research, 23);
+        let footprint: Vec<_> = building_footprint_cells(loaded.grid.size, x, y)
+            .map(|(cell_x, cell_y)| loaded.grid.idx(cell_x, cell_y))
+            .collect();
+        assert_eq!(footprint.len(), 9);
+        assert!(footprint
+            .iter()
+            .all(|&index| loaded.building_cells[index] == 1));
+
+        loaded.save_file(&path).unwrap();
+        let reloaded = World::load_file(&path).unwrap();
+        assert_eq!(persistent_bytes(&loaded), persistent_bytes(&reloaded));
+
+        let mut malformed = WorldSnapshotV4::capture(&loaded);
+        malformed.base.base.building_cells[footprint[0]] = 0;
+        write_envelope(&path, VERSION_V4, &encode_snapshot(&malformed).unwrap()).unwrap();
+        assert!(World::load_file(&path)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("not canonical"));
         cleanup(&path);
     }
 
@@ -1258,7 +1462,7 @@ mod tests {
     }
 
     fn persistent_bytes(world: &World) -> Vec<u8> {
-        encode_snapshot(&WorldSnapshotV3::capture(world)).unwrap()
+        encode_snapshot(&WorldSnapshotV4::capture(world)).unwrap()
     }
 
     fn test_path(label: &str) -> PathBuf {

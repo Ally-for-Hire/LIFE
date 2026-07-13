@@ -23,8 +23,12 @@ shape the layout like a game HUD.
   yellow cells are stockpiles, and leaders are lightened. During the logistics
   ablation, retained roads turn gray because they provide no movement benefit.
   Houses are blue, granaries gold, workshops purple, markets teal, and walls gray;
-  incomplete sites brighten as physical construction advances. Blue-gray cells are
-  finite mineral deposits; equipped entities receive a pale steel tint.
+  incomplete 3x3 sites brighten as physical construction advances. Readable overlay
+  icons distinguish each building, leaders have gold rings, and colored activity rings
+  expose fighting, construction, research, trade, mining, starvation, and rescue at a
+  glance. Blue-gray cells are finite mineral deposits; equipped entities receive a pale
+  steel tint. Orange cells are stealable death-loot piles; blue-gray activity rings
+  mark hiding units. Two or three units sharing a cell fan into distinct overlay positions.
 
 ## Controls panel (left)
 
@@ -86,3 +90,9 @@ Rolling plots of **population & leaders & clans**, **food on the map**,
 - **Seed best brain → live world:** inject the current champion as a new clan so
   you can watch the evolved leader play.
 - A **fitness-over-generations** graph (best + average).
+
+Promotion-proxy metrics belong to the separate headless marathon and are intentionally not
+shown as live GUI fields. Its log distinguishes arena survival from fixed-proxy results,
+current-generation versus retained-archive passes, continuous deficit, failed components,
+proxy/full-cycle time, and whether the incumbent is a current reference or only absolute
+floors apply.

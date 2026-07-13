@@ -39,9 +39,9 @@ tile?". Here each layer is a flat `Vec` indexed by `y * size + x`:
 - `pellet: Vec<u8>` — food energy per cell.
 
 The world also keeps an **occupancy grid** (`Vec<u16>`, rebuilt each tick) that
-enforces **one NPC per tile**, a reusable flood-fill buffer for territory
+enforces **at most three NPCs per tile**, a reusable flood-fill buffer for territory
 pruning, and an O(1) running `pellet_total`. Settlement data stays at World level:
-`buildings` owns stable sites, `building_cells` is a one-cell footprint lookup,
+`buildings` owns stable sites, `building_cells` is the canonical physical 3x3 footprint layer,
 `settlements` is sorted per-clan tech/project/stat state, and
 `community_settlement` is the live treatment switch. Military state is also
 World-level so frozen V1/V2 nested DTOs stay decodable: stable deposits, sorted
@@ -117,12 +117,14 @@ lookup; the sine/trend state is computed only for yield, UI, and diagnostics.
   identical run (covered by a test).
 - Full-world persistence stores every behavior-affecting field in vector order,
   including exact xoshiro state and cached decisions. Only `reach` and `occupied`
-  scratch buffers are omitted and rebuilt. V2 adds buildings, the one-cell
-  footprint layer, clan technology/stats, and the settlement ablation; V1 loads
-  migrate explicitly to empty enabled settlement state. V3 wraps frozen V2 with
+  scratch buffers are omitted and rebuilt. Frozen V2 adds buildings, its legacy
+  anchor lookup, clan technology/stats, and the settlement ablation; V1 loads
+  migrate explicitly to empty enabled settlement state, while V2/V3 loads rebuild
+  canonical physical 3x3 footprints. V3 wraps frozen V2 with
   deposits, cargo, equipment, production/counters, and the military ablation;
   V1/V2 migrate to enabled military with deterministically regenerated reachable
-  deposits and empty cargo/production/ownership state.
+  deposits and empty cargo/production/ownership state. V4 requires exact canonical
+  footprints and at most three live entities per cell.
 - `community_logistics=false` is a deterministic infrastructure ablation. Wood
   regrowth still consumes the same per-forest RNG draws but does not mutate the
   layer, preventing avoidable RNG drift from the regrowth branch. Later divergence
@@ -172,6 +174,22 @@ hauling throughput, `road_steps` counts real member movement on active roads, an
 Quality/training expose hauling throughput and road utility separately while
 retaining the composite logistics field for compatibility.
 
+## Promotion-aware retraining
+
+The unattended trainer now has three deterministic stages: rotating common-random-number
+arenas rank the population; every eight generations a six-world fixed proxy screens the top
+twelve unique candidates plus a four-entry near-pass archive; then only the proxy-best passer
+reaches the full headline and paired care/logistics/trade/settlement/military suite. The proxy records both exact failed
+components and a continuous normalized shortfall, and retained policies plus mutated
+descendants re-enter breeding.
+
+Absolute promotion floors always fail closed, including non-finite evidence. An incumbent
+acts as a relative non-regression reference only when its headline, specialization, and every
+paired subsystem pass the same current contract. Otherwise the challenger is compared with
+explicit safe causal floors, so an obsolete champion cannot permanently block adaptation.
+Care is opportunity-aware: paired safety always applies, while rescue-rate evidence is
+required only when incapacitations actually occur.
+
 ## Community care validation counters
 
 Each clan records incapacitations, completed rescues, and bleed-outs. Quality uses
@@ -186,4 +204,5 @@ accounting when the peaceful tracked champion creates no natural opportunities.
 Each frame the world is painted into a `Color32` pixel buffer (terrain base →
 territory tint → wood/roads → ore/pellets → trees → buildings → stockpiles → equipped entities), uploaded as a
 NEAREST-filtered texture, and drawn into the viewport with pan/zoom. One cell =
-one texel.
+one texel for simulation truth; screen-space building silhouettes and entity activity
+rings sit above it so important state remains legible without changing coordinates.

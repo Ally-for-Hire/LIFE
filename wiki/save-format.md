@@ -22,7 +22,7 @@ Balanced / Buffet / Famine) override several at once.
 | --- | --- | --- |
 | `starve_ticks` | 1400 | ticks without food before health drains |
 | `starve_damage` | 0.05 | health lost per tick while starving |
-| `heal_rate` | 0.08 | health regained per tick while fed |
+| `heal_rate` | 0.008 | health regained per tick while fed |
 | `base_health` | 10 | villager health |
 | `leader_health` | 24 | leader health |
 | `hunger_min` / `hunger_max` | 0.16 / 0.42 | personal hunger-trigger range |
@@ -63,8 +63,8 @@ season cycle turns plenty into scarcity.
 | `season_amp` | 0.55 | yield swing and harshness amplitude; lean yield ≈ `1-amp`× and winter pressure scales with amp |
 
 The named phase is derived from `tick % season_length`; no new field is saved.
-Seasonal Reality V1 therefore stays within `LIFEWRLD` V3. Existing snapshots
-continue exactly under the current rules, including across a phase boundary.
+Seasonal Reality V1 therefore did not itself advance the then-current V3 envelope;
+current V4 snapshots still derive phase state and continue exactly across a boundary.
 
 ## Growth / expansion
 
@@ -113,8 +113,8 @@ Brain inputs 16, 20, and 21 now expose road coverage, stored wood per member,
 and reachable forest wood. The network dimensions remain fixed, so existing
 champion files remain compatible.
 
-Community Care uses a 240-tick rescue window, 12-cell assignment radius, and 35%
-revival health. Input 28 now reports normalized roster health. These mechanics add
+Community Care uses a 240-tick rescue window, 12-cell assignment radius, and 60%
+revival health. The higher post-rescue floor offsets the much lower ambient regeneration. Input 28 now reports normalized roster health. These mechanics add
 runtime entity/clan state but do not change the fixed brain dimensions or `LFB1`
 champion format.
 
@@ -131,8 +131,9 @@ Project planning runs every 120 ticks only with at least four members, ordinary
 food of four/member, full reserve of four/member, hunger below 0.85, no active
 site, and enough wood for the cost plus a four-wood margin. Building costs are:
 House 12 wood/24 work, Granary 18/36, Workshop 24/48, Market 30/60, and Wall
-10/20. Research runs every 30 ticks at a physical workshop and costs 40/90/160
-for levels 1/2/3. Inputs 17–18 carry normalized development and technology; the
+10/20. Completed workshops add baseline research every 30 ticks; a physically present
+Scout leader adds an extra tick every 10 ticks. Levels cost 40/90/160 research.
+Buildings reserve and render a clear 3x3 map footprint around their anchor. Inputs 17–18 carry normalized development and technology; the
 fixed brain and champion formats do not change.
 
 Military Equipment uses a World-level `community_military` switch. One stable
@@ -187,20 +188,22 @@ rosters, references, brain dimensions, RNG, and diplomacy before returning a new
 world. The UI installs it transactionally, pauses it, clears stale view/history
 state, and disables trainer-champion auto-sync until explicitly re-enabled.
 
-V2 keeps the frozen V1 base DTO and adds buildings, the one-cell building lookup
-layer, sorted clan settlement/technology state, causal counters, the live ablation,
+V2 keeps the frozen V1 base DTO and adds buildings, a legacy anchor-only building
+lookup layer, sorted clan settlement/technology state, causal counters, the live ablation,
 and the next stable building id. Loading a V1 file explicitly initializes an empty
 enabled settlement layer; it never reinterprets V1 bytes as the newer layout.
 Validation rejects duplicate/missing building ids, inconsistent footprints,
 out-of-bounds sites, invalid construction/HP, bad tech/research values, unsorted
 settlement records, project references that are not live incomplete buildings
 owned by the same clan, and orphaned incomplete sites without exactly one active
-clan project.
+clan project. V2/V3 restore explicitly rebuilds the canonical in-bounds 3x3 runtime
+footprints; V4 validation requires that exact canonical layer.
 
-V3 wraps the frozen V2 DTO and adds stable deposits, sorted entity ore cargo,
-sorted physical loadouts, sorted clan miner/project/counter state, the military
-ablation, and next deposit id. V1/V2 loads explicitly regenerate deterministic
-reachable deposits and initialize empty enabled cargo/production/ownership state.
+V3 wraps frozen V2 with stable deposits, cargo, loadouts, and military state. V4
+wraps frozen V3 with sorted persistent ground-loot piles. V1-V3 loads migrate with
+empty loot and deterministically relocate only legacy live-entity cell overflow;
+V1/V2 also regenerate deterministic deposits and empty military ownership. V4 rejects
+more than three live entities in one cell.
 Validation rejects duplicate/out-of-order deposits, bad positions/
 amounts/next ids, unsorted or orphaned cargo/loadouts, empty/invalid equipment,
 negative clan ore, and miner/project recipients outside the owning live clan.

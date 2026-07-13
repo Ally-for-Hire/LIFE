@@ -15,8 +15,8 @@ Each NPC has hunger (`ticks_since_food`), health, a personal speed, a food
 2. **Eat if hungry** (past the personal threshold) — see *Foraging*.
 3. Otherwise act on the clan's current goal, else wander.
 
-**One NPC per tile:** movement is gated by an occupancy grid, so NPCs queue and
-spread instead of stacking.
+**Up to three NPCs per tile:** movement is gated by a counted occupancy grid. Small
+groups can cluster, but a fourth unit must queue or route around the cell.
 
 **Death model.** An NPC dies only from genuine scarcity or combat. Individual
 hunger foraging always runs *before* the clan's collective goal, so a clan never
@@ -131,8 +131,8 @@ across the living roster, with incapacitated members contributing zero.
 
 Healthy Gather and Defend workers within 12 cells receive a deterministic rescue
 override. Hunger remains the rescuer's personal priority; otherwise it reaches the
-patient, carries the patient one cell behind it to the stockpile, and restores 35%
-health. A missed deadline becomes a normal combat death and retains delayed kill,
+patient, carries the patient one cell behind it to the stockpile, and restores 60%
+health so rescued members remain viable under the low ambient regeneration default. A missed deadline becomes a normal combat death and retains delayed kill,
 loss, and loot credit. The disabled arm keeps immediate-death behavior for causal
 comparison. Care quality is completed rescues divided by incapacitations, so
 creating more injuries cannot improve the score by itself.
@@ -164,8 +164,9 @@ changing the `LFB1` brain dimensions.
 Every 120 ticks, an eligible clan may reserve wood for one physical construction
 site only after reaching four members, filling ordinary food plus emergency reserve
 floors, and retaining a wood margin. Stable site selection prefers nearby owned,
-passable, unoccupied cells and breaks ties by distance then grid index. The project
-spends its wood up front; Expand workers must walk adjacent and contribute work.
+passable anchors whose complete 3x3 footprints are clear, and breaks ties by distance
+then grid index. The project spends its wood up front; Expand workers must walk
+adjacent and contribute work.
 
 - **House (12 wood / 24 work):** adds two population capacity and heals nearby
   clan members by 0.02 health/tick within six cells.
@@ -176,10 +177,11 @@ spends its wood up front; Expand workers must walk adjacent and contribute work.
 - **Market (30 / 60):** unlocked at level 2; increases physical courier loads.
 
 The build sequence establishes granary, workshop, housing, threat-driven walls,
-and trade-driven markets before repeating capacity buildings. A Scout-mode leader
-walks adjacent to a completed workshop and contributes one research point every 30
-ticks; levels cost 40, 90, and 160 points and cap at 3. Level 2 also doubles
-physical construction work. Inputs 17 and 18 report
+and trade-driven markets before repeating capacity buildings. Every completed Workshop
+contributes one baseline research point every 30 ticks. A Scout-mode leader that is
+physically adjacent contributes one additional point every 10 ticks; levels cost 40,
+90, and 160 points and cap at 3. Level 2 also doubles physical construction work.
+Inputs 17 and 18 report
 normalized development and technology without changing the 32-input `LFB1` format.
 The live ablation zeros those signals and disables all mechanics/effects while
 preserving structural state for paired comparison. On a mid-world toggle, protected
@@ -187,10 +189,9 @@ food above the ordinary four-per-member reserve cap is discarded immediately so 
 disabled granary cannot keep granting survival value.
 
 The tracked 13-world treatment/control pair preserves 1.000 clan survival,
-records 0.930/0.926 food security and +0.002 enabled fairness, and averages 60.9
-work, 1.85 completed buildings, and +7.38 causal public-good value. It observed no
-natural Scout research, so a focused deterministic physical-workshop test proves
-research progression without inflating the natural benchmark claim.
+records 0.932/0.931 food security and +0.003 enabled fairness, and averages 40.6
+work, 1.15 completed buildings, 27.2 research ticks, 0.10 normalized technology,
+and +3.85 causal public-good value.
 
 ## Resource-backed Military Equipment V1
 
@@ -218,10 +219,10 @@ stored plus reachable ore. Inputs 25 and 29 retain their day/night and water/coa
 reservations. The live ablation zeros both military inputs and disables the full
 pipeline, scoring, and combat effects while retaining referentially valid state.
 
-The tracked 13-world pair preserves 1.000 clan survival, reports 0.931/0.935 food
-security and +0.002 enabled fairness, and averages 15.4 delivered ore, 2.9 items,
-and about 4,070 equipped-member ticks. The same-clan full pipeline completes in
-38% of worlds; focused tests prove exact weapon/armor math without requiring
+The tracked 13-world pair preserves 1.000 clan survival, reports 0.936/0.936 food
+security and +0.007 enabled fairness, and averages 9.8 delivered ore, 1.3 items,
+and about 1,311 equipped-member ticks. The same-clan full pipeline completes in
+31% of worlds; focused tests prove exact weapon/armor math without requiring
 natural violence as a release condition.
 
 If a leader dies a follower is promoted; a clan disbands only when no members
@@ -253,8 +254,15 @@ A clan member attacks an adjacent target when:
 - the two clans are **at war**: past the grace period with combined aggression
   ≥ `war_threshold`.
 
-Attacks deal `attack_damage`, need adjacency, respect a cooldown, and a kill loots
-carried food. For `clan_grace_ticks` at the start there is a peace period.
+Attacks deal `attack_damage`, need adjacency, and respect a cooldown. A terminal death
+drops carried food, wood, dedicated trade cargo, and ore into a persistent orange pile.
+The first active unit to occupy that cell steals what it can, regardless of ownership.
+
+Low-health non-leader Defend workers near home can **hide** when they have no cargo,
+trade, or rescue duty. Hiding is static and cuts enemy detection range against that unit
+to the nearest whole-cell 20% (an 80% reduction), with a one-cell floor and direct combat
+revealing the target.
+For `clan_grace_ticks` at the start there is a peace period.
 
 ## Population growth (reproduction)
 

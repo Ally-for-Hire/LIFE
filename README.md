@@ -64,6 +64,12 @@ cargo run --release        # first release build takes a few minutes, then it's 
   quality and then pass a paired logistics-on/off promotion gate. Survival, food
   security, clan fairness, expert routing, transport value, and reserve use can no
   longer be traded away for a higher headline score.
+- **Promotion-aware Retraining V1.3:** every eight generations screens the top
+  twelve unique arena policies plus four retained near-passes on a cheap fixed-world
+  proxy. A continuous gate deficit guides breeding; only a proxy passer reaches
+  the full release suite. Absolute survival/fairness and causal care, logistics,
+  trade, settlement, and military floors always apply. Incumbent-relative checks
+  apply only when that incumbent passes the same current contract.
 - **Safe MoE Specialization V1:** the trainer distinguishes genuine contextual
   delegation from both uniform expert mixing and single-expert collapse. Promotion
   and a sixth archive slot use utilization, decisiveness, context information,
@@ -85,15 +91,16 @@ cargo run --release        # first release build takes a few minutes, then it's 
   versioned, checksummed, atomic format and restores exact RNG, brains, economy,
   care, courier, and diplomacy state for byte-identical continuation.
 - **Buildings/Technology V1:** food-secure clans reserve harvested wood for
-  one-cell physical construction sites. Expand workers build houses, granaries,
+  3x3 physical construction sites. Expand workers build houses, granaries,
   workshops, markets, and walls; Scout leaders research at completed workshops,
   unlocking stronger civic options without changing the fixed `LFB1` brain shape.
 - **Military Equipment V1:** deterministic mineral deposits feed a physical
   ore-to-equipment chain. One food-secure Gather miner hauls ore; an Expand smith
   works beside a workshop and personally receives the spear, sword, or armor it
   finishes. The live ablation makes retained equipment completely inert.
-- **Combat**, **food-gated reproduction**, **food memory**, and **one NPC per
-  tile**.
+- **Combat**, **food-gated reproduction**, **food memory**, and **up to three NPCs per
+  tile**; defeated units leave stealable resource piles and wounded defenders can hide
+  statically with 80% lower detection range.
 - Game-like **toggleable panels**, an **NPC inspector** (its current "idea"),
   live **graphs**, **one-click presets**, and a slider for **every world
   parameter**.
@@ -132,56 +139,61 @@ The V1.1 tests run paired logistics-on/off worlds with the same brain, seeds, an
 world specifications. Ordinary training does not pay this doubled simulation
 cost; the ablation is an explicit release-validation gate.
 
-Marathon training pays that paired cost only when a fixed-world challenger first
-beats the incumbent. Rejected candidates are logged with concrete reasons and
-never overwrite `champion.bin`.
+Marathon training first screens top-K candidates with a cheap fixed proxy and pays
+the full paired cost only for its best passer. Rejected candidates are logged with
+continuous deficit plus concrete reasons and never overwrite `champion.bin`.
+Use `LIFE_TRAIN_CHAMPION=promotion-diagnostic.bin` and
+`LIFE_TRAIN_LOG=promotion-diagnostic.log` for a scratch run that cannot replace
+the tracked champion.
 
 Community Care has a separate same-world treatment/control benchmark. The tracked
-peaceful champion preserves **1.000** robust survival, **0.929** food security,
-and **+0.009** clan fairness; it produced no clan-member wound opportunities in
+peaceful champion preserves **1.000** robust survival, **0.933** food security,
+and **+0.019** clan fairness; it produced no clan-member wound opportunities in
 the natural 13-world sample, so deterministic forced-combat tests provide the
 causal rescue proof without claiming an unobserved natural-play gain.
 
-Trade's 13-world paired result preserves **1.000** robust and cohort survival,
-food security **0.932 / 0.936** (enabled/disabled), and enabled fairness **+0.010**.
-The treatment delivers **6.3 food + 3.8 wood** across **5.8 physical trips** per
-world while the disabled control delivers none; positive delivery is a hard gate.
+Trade's current 13-world pair preserves **1.000** robust survival and food security
+**0.935 / 0.935** (enabled/disabled). The treatment delivers **6.1 food + 7.7 wood**
+across **8.6 physical trips** per world while the disabled control delivers none.
+The pre-change champion still fails the strict gate on **-0.25 worst-world fairness**;
+positive delivery cannot override that safety contract.
 
 Buildings/Technology's 13-world paired result preserves **1.000** robust clan
-survival and food security **0.930 / 0.926** (enabled/disabled), with enabled
-fairness **+0.002**. Clans perform **60.9 physical construction work**, complete
-**1.85 buildings**, and produce **+7.38 causal public-good value** per world.
-Natural tracked runs did not assign Scout leaders to workshop research, so the
-deterministic physical-workshop unit test proves research progression separately;
-the release benchmark does not claim unobserved natural technology gain.
+survival and food security **0.932 / 0.931** (enabled/disabled), with enabled
+fairness **+0.003**. Clans perform **40.6 physical construction work**, complete
+**1.15 buildings**, average **27.2 research ticks** and **0.10 normalized technology**,
+and produce **+3.85 causal public-good value** per world. Completed workshops now
+provide baseline research, while a physically present Scout leader contributes
+additional research at 3x the baseline cadence.
 
 Military Equipment's 13-world pair preserves **1.000** clan survival, food
-security **0.931 / 0.935**, and enabled fairness **+0.002**. Enabled worlds deliver
-**15.4 ore**, complete **2.9 items**, accumulate about **4,070 equipped-member
-ticks**, and finish the full physical pipeline in **38%** of worlds; the disabled
+security **0.936 / 0.936**, and enabled fairness **+0.007**. Enabled worlds deliver
+**9.8 ore**, complete **1.3 items**, accumulate about **1,311 equipped-member
+ticks**, and finish the full physical pipeline in **31%** of worlds; the disabled
 arm performs no military work.
 
 Current tracked-champion result across 13 paired worlds: initial-clan survival
-**1.000 / 1.000** (enabled/disabled), food security **0.935 / 0.910**, hauling
-throughput **0.663 / 0.563**, road utility **0.253 / 0**, and enabled fairness
-**+0.020**. The strict security gate remains in force; the integrated treatment
-currently improves rather than spends that margin.
+**1.000 / 1.000** (enabled/disabled), food security **0.932 / 0.933**, hauling
+throughput **0.732 / 0.619**, road utility **0.259 / 0**, and enabled fairness
+**+0.028**. The small **-0.0013** security delta remains inside the strict 0.01
+non-regression tolerance.
 
 Seasonal Reality's separate 13-world, two-cycle harsh-climate contract preserves
 **1.000** mean and robust winter clan survival with neutral parity. Food security
-falls from **0.927** in summer to **0.916** in winter, while births fall from
-**0.014** of the summer cohort to **0.002** in winter; winter task coverage remains
-**0.661**. Summer stores decline **0.111 food/member** as the population grows,
-and this sample performs no summer construction or reserve release, so the
-release does not claim either outcome. Ordinary training does not pay this extra
-benchmark cost.
+edges from **0.924** in summer to **0.922** in winter, while births fall from
+**0.0086** of the summer cohort to **0.0020** in winter; winter task coverage remains
+**0.619**. Summer stores grow **0.760 food/member**, with **2.77 construction work**
+and **0.08 completed buildings** per world. This sample performs no winter reserve
+release, so the release does not claim that outcome. Ordinary training does not pay
+this extra benchmark cost.
 
 `life-rs/champion.bin` is the tracked deployable model. Marathon logs, stage/gen
 snapshots, backup champions, and `target/` are generated locally and git-ignored.
 `world.lifeworld` is the separate full simulation snapshot. V2 adds settlement
 state; V3 adds deposits, carried ore, forge projects, equipment ownership, military
-counters, and the ablation. V1/V2 migrate explicitly without reinterpreting old
-bytes. Loading pauses the
+counters, and the ablation. V4 adds persistent ground loot, exact 3x3 building
+footprints, and the three-live-unit cell cap. V1-V3 migrate explicitly without
+reinterpreting old bytes. Loading pauses the
 world and detaches trainer-champion auto-sync until the user re-enables it.
 
 ## Documentation

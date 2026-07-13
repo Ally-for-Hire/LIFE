@@ -29,6 +29,7 @@ pub enum Goal {
     MiningOre,
     HaulingOre,
     ForgingEquipment,
+    Hiding,
 }
 
 impl Goal {
@@ -56,6 +57,7 @@ impl Goal {
             Goal::MiningOre => "mining ore",
             Goal::HaulingOre => "hauling ore",
             Goal::ForgingEquipment => "forging equipment",
+            Goal::Hiding => "hiding",
         }
     }
 }

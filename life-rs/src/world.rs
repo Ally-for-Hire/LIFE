@@ -33,7 +33,7 @@ mod persistence;
 // Default values (also slider starting points).
 pub const D_STARVE_TICKS: i32 = 1400;
 pub const D_STARVE_DAMAGE: f32 = 0.05;
-pub const D_HEAL_RATE: f32 = 0.08;
+pub const D_HEAL_RATE: f32 = 0.008;
 pub const D_BASE_HEALTH: f32 = 10.0;
 pub const D_LEADER_HEALTH: f32 = 24.0;
 pub const D_MIN_SPEED: f32 = 0.25;
@@ -91,7 +91,7 @@ const STOCKPILE_FOOD_PER_MEMBER: i32 = 4;
 const AUTUMN_STOCKPILE_FOOD_PER_MEMBER: i32 = 3;
 const RESCUE_WINDOW_TICKS: i32 = 240;
 const RESCUE_RADIUS: i32 = 12;
-const RESCUE_REVIVE_HEALTH: f32 = 0.35;
+const RESCUE_REVIVE_HEALTH: f32 = 0.60;
 const TRADE_REFRESH_INTERVAL: i32 = CLAN_THINK_INTERVAL;
 const TRADE_RANGE: i32 = 60;
 const TRADE_PACT_TICKS: i32 = CLAN_THINK_INTERVAL * 6;
@@ -102,7 +102,9 @@ const TRADE_WOOD_FLOOR: i32 = 6;
 const TRADE_FOOD_LOAD: i32 = 2;
 const TRADE_WOOD_LOAD: i32 = 1;
 const SETTLEMENT_PLAN_INTERVAL: i32 = 120;
-const RESEARCH_INTERVAL: i32 = 30;
+const RESEARCH_INTERVAL: i32 = 10;
+const PASSIVE_RESEARCH_INTERVAL: i32 = 30;
+const MAX_ENTITIES_PER_CELL: u16 = 3;
 const HOUSE_MEMBER_CAPACITY: usize = 2;
 const GRANARY_RESERVE_CAPACITY: i32 = 6;
 const SETTLEMENT_WOOD_MARGIN: i32 = 4;
@@ -254,6 +256,35 @@ pub struct Tree {
     pub destroyed: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GroundLoot {
+    pub x: i32,
+    pub y: i32,
+    pub food: i32,
+    pub wood: i32,
+    pub ore: u16,
+}
+
+impl GroundLoot {
+    fn is_empty(&self) -> bool {
+        self.food <= 0 && self.wood <= 0 && self.ore == 0
+    }
+}
+
+/// Row-major cells in the in-bounds 3x3 footprint centered on a building
+/// anchor. Placement, persistence, occupancy, and rendering share this geometry.
+pub(crate) fn building_footprint_cells(
+    size: i32,
+    x: i32,
+    y: i32,
+) -> impl Iterator<Item = (i32, i32)> {
+    let min_x = (x - 1).max(0);
+    let max_x = (x + 1).min(size - 1);
+    let min_y = (y - 1).max(0);
+    let max_y = (y + 1).min(size - 1);
+    (min_y..=max_y).flat_map(move |cell_y| (min_x..=max_x).map(move |cell_x| (cell_x, cell_y)))
+}
+
 pub struct World {
     pub grid: Grid,
     pub tick: i32,
@@ -271,6 +302,7 @@ pub struct World {
     pub ore_cargo: Vec<EntityOreCargo>,
     pub militaries: Vec<ClanMilitary>,
     pub equipment: Vec<EntityEquipment>,
+    pub ground_loot: Vec<GroundLoot>,
     pub community_military: bool,
     next_entity_id: u32,
     next_clan_id: i32,
@@ -293,7 +325,7 @@ pub struct World {
     /// fed to leaders so they can learn to keep reserves against shocks.
     disaster_level: f32,
     reach: Vec<i32>,    // reusable flood-fill buffer for territory pruning
-    occupied: Vec<u16>, // entities per cell, enforces one NPC per tile
+    occupied: Vec<u16>, // entities per cell, capped at three units per tile
 }
 
 impl World {
@@ -315,6 +347,7 @@ impl World {
             ore_cargo: Vec::new(),
             militaries: Vec::new(),
             equipment: Vec::new(),
+            ground_loot: Vec::new(),
             community_military: true,
             next_entity_id: 1,
             next_clan_id: 1,
@@ -371,10 +404,82 @@ impl World {
         self.ore_cargo.clear();
         self.militaries.clear();
         self.equipment.clear();
+        self.ground_loot.clear();
         self.disaster_level = 0.0;
         self.next_clan_id = 1;
         self.next_building_id = 1;
         self.next_ore_deposit_id = 1;
+    }
+
+    fn reserve_building_footprint(&mut self, x: i32, y: i32, id: BuildingId) {
+        for (cell_x, cell_y) in building_footprint_cells(self.grid.size, x, y) {
+            let cell = self.grid.idx(cell_x, cell_y);
+            if self.building_cells[cell] == 0 || id.0 < self.building_cells[cell] {
+                self.building_cells[cell] = id.0;
+            }
+        }
+    }
+
+    fn clear_building_footprint(&mut self, x: i32, y: i32, id: BuildingId) {
+        for (cell_x, cell_y) in building_footprint_cells(self.grid.size, x, y) {
+            let cell = self.grid.idx(cell_x, cell_y);
+            if self.building_cells[cell] == id.0 {
+                self.building_cells[cell] = 0;
+            }
+        }
+    }
+
+    fn rebuild_building_footprints(&mut self) {
+        self.building_cells.fill(0);
+        let active: Vec<_> = self
+            .buildings
+            .iter()
+            .filter(|building| !building.is_destroyed())
+            .map(|building| (building.x, building.y, building.id))
+            .collect();
+        for (x, y, id) in active {
+            self.reserve_building_footprint(x, y, id);
+        }
+    }
+
+    /// V1-V3 predate the live three-unit admission rule. Preserve those saves
+    /// by relocating only overflow entities to the nearest deterministic free
+    /// passable cell; V4 validates the invariant instead of migrating it.
+    fn migrate_legacy_entity_cell_capacity(&mut self) -> bool {
+        let cell_count = self.grid.terrain.len();
+        let mut counts = vec![0u16; cell_count];
+        for entity_index in 0..self.entities.len() {
+            if self.entities[entity_index].dead {
+                continue;
+            }
+            let (x, y) = (self.entities[entity_index].x, self.entities[entity_index].y);
+            let cell = self.grid.idx(x, y);
+            if counts[cell] < MAX_ENTITIES_PER_CELL {
+                counts[cell] += 1;
+                continue;
+            }
+
+            let replacement = (0..cell_count)
+                .filter(|&candidate| {
+                    counts[candidate] < MAX_ENTITIES_PER_CELL
+                        && terrain_move_cost(self.grid.terrain[candidate]).is_finite()
+                })
+                .min_by_key(|&candidate| {
+                    let candidate_x = candidate as i32 % self.grid.size;
+                    let candidate_y = candidate as i32 / self.grid.size;
+                    (
+                        (candidate_x - x).abs().max((candidate_y - y).abs()),
+                        candidate,
+                    )
+                });
+            let Some(replacement) = replacement else {
+                return false;
+            };
+            self.entities[entity_index].x = replacement as i32 % self.grid.size;
+            self.entities[entity_index].y = replacement as i32 / self.grid.size;
+            counts[replacement] += 1;
+        }
+        true
     }
 
     // --- terrain ---
@@ -757,6 +862,9 @@ impl World {
     }
 
     pub fn spawn_entity(&mut self, x: i32, y: i32, is_leader: bool) {
+        if self.cell_at_capacity(x, y) {
+            return;
+        }
         let e = self.make_entity(x, y, is_leader);
         self.entities.push(e);
     }
@@ -768,61 +876,81 @@ impl World {
 
     /// Random unowned, passable cell — keeps spawns off water/mountain and out
     /// of existing clan territory (so they don't spawn straight into a kill).
-    fn random_land_cell(&mut self) -> (i32, i32) {
+    fn random_land_cell(&mut self) -> Option<(i32, i32)> {
         for _ in 0..50 {
             let (x, y) = self.random_cell();
             let i = self.grid.idx(x, y);
             let t = self.grid.terrain[i];
-            if t != terrain::WATER && t != terrain::MOUNTAIN && self.grid.owner[i] == NO_OWNER {
-                return (x, y);
+            if t != terrain::WATER
+                && t != terrain::MOUNTAIN
+                && self.grid.owner[i] == NO_OWNER
+                && !self.cell_at_capacity(x, y)
+            {
+                return Some((x, y));
             }
         }
         for _ in 0..50 {
             let (x, y) = self.random_cell();
-            if self.is_passable(x, y) {
-                return (x, y);
+            if self.is_passable(x, y) && !self.cell_at_capacity(x, y) {
+                return Some((x, y));
             }
         }
-        self.random_cell()
+        for require_unowned in [true, false] {
+            for cell in 0..self.grid.terrain.len() {
+                let x = cell as i32 % self.grid.size;
+                let y = cell as i32 / self.grid.size;
+                if self.is_passable(x, y)
+                    && (!require_unowned || self.grid.owner[cell] == NO_OWNER)
+                    && !self.cell_at_capacity(x, y)
+                {
+                    return Some((x, y));
+                }
+            }
+        }
+        None
     }
 
     /// A passable, unowned cell biased toward high fertility — picks the most
     /// fertile of several random samples. Used to seed trees (and clans) onto
     /// the good land that's worth settling and fighting for.
-    fn random_fertile_land_cell(&mut self) -> (i32, i32) {
-        let mut best = self.random_land_cell();
+    fn random_fertile_land_cell(&mut self) -> Option<(i32, i32)> {
+        let mut best = self.random_land_cell()?;
         let mut best_f = self.grid.fertility[self.grid.idx(best.0, best.1)];
         for _ in 0..6 {
-            let (x, y) = self.random_land_cell();
+            let Some((x, y)) = self.random_land_cell() else {
+                break;
+            };
             let f = self.grid.fertility[self.grid.idx(x, y)];
             if f > best_f {
                 best_f = f;
                 best = (x, y);
             }
         }
-        best
+        Some(best)
     }
 
-    fn occupied_by_live_entity(&self, x: i32, y: i32) -> bool {
+    fn cell_at_capacity(&self, x: i32, y: i32) -> bool {
         self.entities
             .iter()
-            .any(|e| !e.dead && e.x == x && e.y == y)
+            .filter(|e| !e.dead && e.x == x && e.y == y)
+            .count()
+            >= MAX_ENTITIES_PER_CELL as usize
     }
 
-    fn nearby_spawn_cell(&mut self, cx: i32, cy: i32, r: i32) -> (i32, i32) {
+    fn nearby_spawn_cell(&mut self, cx: i32, cy: i32, r: i32) -> Option<(i32, i32)> {
         let radius = r.max(1);
         for _ in 0..80 {
             let x = self.grid.clamp(cx + self.rng.range(-radius, radius + 1));
             let y = self.grid.clamp(cy + self.rng.range(-radius, radius + 1));
-            if self.is_passable(x, y) && !self.occupied_by_live_entity(x, y) {
-                return (x, y);
+            if self.is_passable(x, y) && !self.cell_at_capacity(x, y) {
+                return Some((x, y));
             }
         }
         for rr in radius + 1..=(radius + 8).min(self.grid.size) {
             for yy in (cy - rr).max(0)..=(cy + rr).min(self.grid.size - 1) {
                 for xx in (cx - rr).max(0)..=(cx + rr).min(self.grid.size - 1) {
-                    if self.is_passable(xx, yy) && !self.occupied_by_live_entity(xx, yy) {
-                        return (xx, yy);
+                    if self.is_passable(xx, yy) && !self.cell_at_capacity(xx, yy) {
+                        return Some((xx, yy));
                     }
                 }
             }
@@ -830,9 +958,9 @@ impl World {
         self.random_land_cell()
     }
 
-    fn spawn_clan(&mut self) {
+    fn spawn_clan(&mut self) -> bool {
         let brain = self.breed_brain();
-        self.spawn_clan_with(brain);
+        self.spawn_clan_with(brain) != NO_OWNER
     }
 
     /// In-vivo evolution: a new leader's brain is bred from the clans that are
@@ -915,7 +1043,9 @@ impl World {
     }
 
     pub fn spawn_clan_with(&mut self, brain: Brain) -> i32 {
-        let (x, y) = self.random_land_cell();
+        let Some((x, y)) = self.random_land_cell() else {
+            return NO_OWNER;
+        };
         let mut leader = self.make_entity(x, y, true);
         leader.clan = -1;
         let lid = leader.id;
@@ -927,7 +1057,9 @@ impl World {
         let idx = self.clan_index(id).unwrap();
 
         for _ in 0..3 {
-            let (fx, fy) = self.nearby_spawn_cell(x, y, 3);
+            let Some((fx, fy)) = self.nearby_spawn_cell(x, y, 3) else {
+                break;
+            };
             let mut f = self.make_entity(fx, fy, false);
             f.clan = id;
             let fid = f.id;
@@ -956,7 +1088,9 @@ impl World {
         self.generate_terrain();
         self.generate_ore_deposits();
         for _ in 0..trees {
-            let (x, y) = self.random_fertile_land_cell();
+            let Some((x, y)) = self.random_fertile_land_cell() else {
+                break;
+            };
             let last = -self.rng.below(self.params.tree_interval.max(1));
             self.trees.push(Tree {
                 x,
@@ -972,7 +1106,9 @@ impl World {
             self.spawn_clan_with(brain);
         }
         for _ in 0..neutrals {
-            let (x, y) = self.random_land_cell();
+            let Some((x, y)) = self.random_land_cell() else {
+                break;
+            };
             self.spawn_entity(x, y, false);
         }
     }
@@ -982,7 +1118,9 @@ impl World {
         self.generate_terrain();
         self.generate_ore_deposits();
         for _ in 0..trees {
-            let (x, y) = self.random_fertile_land_cell();
+            let Some((x, y)) = self.random_fertile_land_cell() else {
+                break;
+            };
             let last = -self.rng.below(self.params.tree_interval.max(1));
             self.trees.push(Tree {
                 x,
@@ -996,7 +1134,9 @@ impl World {
             ids.push(self.spawn_clan_with(b.clone()));
         }
         for _ in 0..neutrals {
-            let (x, y) = self.random_land_cell();
+            let Some((x, y)) = self.random_land_cell() else {
+                break;
+            };
             self.spawn_entity(x, y, false);
         }
         ids
@@ -1009,7 +1149,9 @@ impl World {
                 .entity_pos(self.clans[idx].leader_id)
                 .unwrap_or((self.grid.size / 2, self.grid.size / 2));
             for _ in 0..6 {
-                let (fx, fy) = self.nearby_spawn_cell(lx, ly, 4);
+                let Some((fx, fy)) = self.nearby_spawn_cell(lx, ly, 4) else {
+                    break;
+                };
                 let mut f = self.make_entity(fx, fy, false);
                 f.clan = id;
                 let fid = f.id;
@@ -1567,9 +1709,10 @@ impl World {
         }
     }
 
-    /// A cell can be entered if it's passable terrain and not already occupied.
+    /// A cell can be entered if it is passable terrain and remains below capacity.
     fn can_enter(&self, x: i32, y: i32) -> bool {
-        self.move_cost_to(x, y).is_finite() && self.occupied[self.grid.idx(x, y)] == 0
+        self.move_cost_to(x, y).is_finite()
+            && self.occupied[self.grid.idx(x, y)] < MAX_ENTITIES_PER_CELL
     }
 
     fn try_step(&mut self, e: &mut Entity, nx: i32, ny: i32) -> bool {
@@ -1578,8 +1721,8 @@ impl World {
             return false; // impassable, or can't afford yet — wait, keep budget
         }
         let ni = self.grid.idx(nx, ny);
-        if self.occupied[ni] > 0 {
-            return false; // one NPC per tile — cell taken
+        if self.occupied[ni] >= MAX_ENTITIES_PER_CELL {
+            return false; // the destination cell is full
         }
         let oi = self.grid.idx(e.x, e.y);
         self.occupied[oi] = self.occupied[oi].saturating_sub(1);
@@ -1668,6 +1811,7 @@ impl World {
         self.refresh_diplomacy();
         self.clan_think();
         self.plan_settlement_projects();
+        self.advance_workshop_research();
         self.plan_military_work();
         self.prepare_rescues();
 
@@ -1846,8 +1990,10 @@ impl World {
                     break;
                 }
                 if self.rng.chance(birth_chance) {
+                    let Some((bx, by)) = self.nearby_spawn_cell(sx, sy, 2) else {
+                        break;
+                    };
                     self.clans[ci].food -= cost;
-                    let (bx, by) = self.nearby_spawn_cell(sx, sy, 2);
                     let mut baby = self.make_entity(bx, by, false);
                     baby.clan = id;
                     let bid = baby.id;
@@ -1876,8 +2022,7 @@ impl World {
                 if self.rng.chance(chance * 0.04) {
                     let k = self.rng.below(neutrals.len() as i32) as usize;
                     let (nx, ny) = neutrals[k];
-                    let (bx, by) = self.nearby_spawn_cell(nx, ny, 2);
-                    if self.is_passable(bx, by) {
+                    if let Some((bx, by)) = self.nearby_spawn_cell(nx, ny, 2) {
                         self.spawn_entity(bx, by, false);
                         self.births += 1;
                         births_this_check += 1;
@@ -1902,7 +2047,7 @@ impl World {
         }
         if self.maintain_pop > 0 {
             while (self.entities.len() as i32) < self.maintain_pop {
-                if let Some(ci) = self
+                let spawned = if let Some(ci) = self
                     .clans
                     .iter()
                     .enumerate()
@@ -1912,19 +2057,26 @@ impl World {
                     .map(|(i, _)| i)
                 {
                     let id = self.clans[ci].id;
-                    let (sx, sy) = self.clans[ci]
+                    let base = self.clans[ci]
                         .stockpile
                         .or_else(|| self.entity_pos(self.clans[ci].leader_id))
-                        .unwrap_or_else(|| self.random_land_cell());
-                    let (x, y) = self.nearby_spawn_cell(sx, sy, 4);
+                        .or_else(|| self.random_land_cell());
+                    let Some((x, y)) = base.and_then(|(sx, sy)| self.nearby_spawn_cell(sx, sy, 4))
+                    else {
+                        break;
+                    };
                     let mut e = self.make_entity(x, y, false);
                     e.clan = id;
                     let eid = e.id;
                     self.entities.push(e);
                     self.clans[ci].members.push(eid);
                     self.clans[ci].food = self.clans[ci].food.max(4);
+                    true
                 } else {
-                    self.spawn_clan();
+                    self.spawn_clan()
+                };
+                if !spawned {
+                    break;
                 }
             }
         }
@@ -2157,7 +2309,6 @@ impl World {
 
         let starve_ticks = self.params.starve_ticks.max(1) as f32;
         let vision = self.params.vision_radius;
-        let vision2 = (vision * vision) as i64;
         let grace = self.tick < self.params.clan_grace_ticks;
 
         let mut idx_by_id: HashMap<i32, usize> = HashMap::new();
@@ -2172,8 +2323,8 @@ impl World {
         let mut hunger_sum = vec![0f32; n];
         let mut health_sum = vec![0f32; n];
         let mut health_count = vec![0u32; n];
-        let mut clan_members: Vec<(i32, i32, i32, i32, bool)> = Vec::new();
-        let mut neutrals: Vec<(i32, i32)> = Vec::new();
+        let mut clan_members: Vec<(i32, i32, i32, i32, bool, bool)> = Vec::new();
+        let mut neutrals: Vec<(u32, i32, i32, bool)> = Vec::new();
 
         for e in &self.entities {
             if e.dead {
@@ -2198,9 +2349,10 @@ impl World {
                     e.clan,
                     e.trade_target_clan,
                     e.trade_food > 0 || e.trade_wood > 0 || e.trade_returning,
+                    e.goal == Goal::Hiding,
                 ));
             } else {
-                neutrals.push((e.x, e.y));
+                neutrals.push((e.id, e.x, e.y, e.goal == Goal::Hiding));
             }
         }
         let max_pop = pop.iter().copied().max().unwrap_or(1).max(1) as f32;
@@ -2238,7 +2390,7 @@ impl World {
             let mut enemies_seen = 0;
             let mut tres = None;
             let mut td = i64::MAX;
-            for &(ex, ey, ec, trade_target, active_trade) in &clan_members {
+            for &(ex, ey, ec, trade_target, active_trade, hidden) in &clan_members {
                 if ec == id
                     || self.are_allied(id, ec)
                     || self.params.community_trade && active_trade && trade_target == id
@@ -2248,9 +2400,12 @@ impl World {
                 let dx = (ex - lp.0) as i64;
                 let dy = (ey - lp.1) as i64;
                 let d = dx * dx + dy * dy;
-                if d <= vision2 {
-                    enemies_seen += 1;
+                let target_vision = detection_radius(vision, hidden);
+                let target_vision2 = (target_vision * target_vision) as i64;
+                if d > target_vision2 {
+                    continue;
                 }
+                enemies_seen += 1;
                 if d < ed {
                     ed = d;
                     enemy = Some((ex, ey));
@@ -2280,30 +2435,22 @@ impl World {
             let mut npos = None;
             let mut nd = i64::MAX;
             let mut neutrals_seen = 0;
-            for &(nx, ny) in &neutrals {
+            for &(neutral_id, nx, ny, hidden) in &neutrals {
                 let dx = (nx - lp.0) as i64;
                 let dy = (ny - lp.1) as i64;
                 let d = dx * dx + dy * dy;
-                if d <= vision2 {
-                    neutrals_seen += 1;
+                let target_vision = detection_radius(vision, hidden);
+                if d > (target_vision * target_vision) as i64 {
+                    continue;
                 }
-                // a neutral standing on our land is a trespasser too
+                neutrals_seen += 1;
                 if self.grid.owner[self.grid.idx(nx, ny)] == id && d < td {
                     td = d;
                     tres = Some((nx, ny));
                 }
                 if d < nd {
                     nd = d;
-                    npos = Some((nx, ny));
-                }
-            }
-            if npos.is_some() {
-                // recover the nearest neutral's id for deliberate recruiting
-                let target = neutrals
-                    .iter()
-                    .min_by_key(|&&(nx, ny)| (nx - lp.0).pow(2) as i64 + (ny - lp.1).pow(2) as i64);
-                if let Some(&(nx, ny)) = target {
-                    ntarget = self.entity_near(nx, ny, 0);
+                    ntarget = Some(neutral_id);
                     npos = Some((nx, ny));
                 }
             }
@@ -2652,6 +2799,89 @@ impl World {
         best
     }
 
+    fn drop_entity_resources(&mut self, entity_index: usize) {
+        let (x, y, food, wood, entity_id) = {
+            let entity = &mut self.entities[entity_index];
+            let values = (
+                entity.x,
+                entity.y,
+                entity.food.saturating_add(entity.trade_food).max(0),
+                entity.wood.saturating_add(entity.trade_wood).max(0),
+                entity.id,
+            );
+            entity.food = 0;
+            entity.wood = 0;
+            entity.trade_food = 0;
+            entity.trade_wood = 0;
+            entity.trade_target_clan = -1;
+            entity.trade_returning = false;
+            values
+        };
+        let ore = remove_entity_ore_cargo(&mut self.ore_cargo, entity_id);
+        self.add_ground_loot(x, y, food, wood, ore);
+    }
+
+    fn drop_detached_entity_resources(&mut self, entity: &mut Entity) {
+        let food = entity.food.saturating_add(entity.trade_food).max(0);
+        let wood = entity.wood.saturating_add(entity.trade_wood).max(0);
+        let ore = remove_entity_ore_cargo(&mut self.ore_cargo, entity.id);
+        entity.food = 0;
+        entity.wood = 0;
+        entity.trade_food = 0;
+        entity.trade_wood = 0;
+        entity.trade_target_clan = -1;
+        entity.trade_returning = false;
+        self.add_ground_loot(entity.x, entity.y, food, wood, ore);
+    }
+
+    fn add_ground_loot(&mut self, x: i32, y: i32, food: i32, wood: i32, ore: u16) {
+        if food <= 0 && wood <= 0 && ore == 0 {
+            return;
+        }
+        let key = (y, x);
+        match self
+            .ground_loot
+            .binary_search_by_key(&key, |pile| (pile.y, pile.x))
+        {
+            Ok(index) => {
+                let pile = &mut self.ground_loot[index];
+                pile.food = pile.food.saturating_add(food.max(0));
+                pile.wood = pile.wood.saturating_add(wood.max(0));
+                pile.ore = pile.ore.saturating_add(ore);
+            }
+            Err(index) => self.ground_loot.insert(
+                index,
+                GroundLoot {
+                    x,
+                    y,
+                    food: food.max(0),
+                    wood: wood.max(0),
+                    ore,
+                },
+            ),
+        }
+    }
+
+    fn collect_ground_loot(&mut self, entity: &mut Entity) {
+        let key = (entity.y, entity.x);
+        let Ok(index) = self
+            .ground_loot
+            .binary_search_by_key(&key, |pile| (pile.y, pile.x))
+        else {
+            return;
+        };
+        let pile = &mut self.ground_loot[index];
+        entity.food = entity.food.saturating_add(pile.food.max(0));
+        entity.wood = entity.wood.saturating_add(pile.wood.max(0));
+        pile.food = 0;
+        pile.wood = 0;
+        let accepted = add_entity_ore(&mut self.ore_cargo, entity.id, pile.ore);
+        pile.ore -= accepted;
+        if pile.is_empty() {
+            self.ground_loot.remove(index);
+        }
+    }
+
     fn update_entity(&mut self, e: &mut Entity) {
         e.ticks_since_food += self.seasonal_hunger_increment(e.id);
         e.attack_cooldown = (e.attack_cooldown - 1).max(0);
@@ -2659,6 +2889,7 @@ impl World {
             e.goal = Goal::Incapacitated;
             return;
         }
+        self.collect_ground_loot(e);
         let starve_ticks = self.params.starve_ticks.max(1);
         let hunger = e.ticks_since_food as f32 / starve_ticks as f32;
 
@@ -2681,12 +2912,7 @@ impl World {
                     e.health -= self.params.starve_damage;
                     e.goal = Goal::Starving;
                     if e.health <= 0.0 {
-                        e.food += e.trade_food.max(0);
-                        e.wood += e.trade_wood.max(0);
-                        e.trade_target_clan = -1;
-                        e.trade_returning = false;
-                        e.trade_food = 0;
-                        e.trade_wood = 0;
+                        self.drop_detached_entity_resources(e);
                         e.dead = true;
                         self.deaths_starved += 1;
                         return;
@@ -2750,9 +2976,7 @@ impl World {
                 e.health -= self.params.starve_damage;
                 e.goal = Goal::Starving;
                 if e.health <= 0.0 {
-                    if e.trade_target_clan >= 0 {
-                        self.cancel_trade(e, cidx);
-                    }
+                    self.drop_detached_entity_resources(e);
                     e.dead = true;
                     self.deaths_starved += 1;
                     return;
@@ -3327,11 +3551,20 @@ impl World {
             }
         }
         if let Some((sx, sy)) = self.clans[cidx].stockpile {
-            e.goal = Goal::Defending;
             let d = (e.x - sx).abs().max((e.y - sy).abs());
             if d > 6 {
+                e.goal = Goal::Defending;
                 self.move_toward(e, sx, sy, true);
+            } else if !e.is_leader
+                && e.health < e.max_health * 0.6
+                && e.food == 0
+                && e.wood == 0
+                && e.trade_target_clan < 0
+                && e.rescue_target.is_none()
+            {
+                e.goal = Goal::Hiding;
             } else {
+                e.goal = Goal::Defending;
                 self.random_walk(e, true);
             }
         } else {
@@ -3462,32 +3695,13 @@ impl World {
         for i in expired {
             let victim_clan = self.entities[i].clan;
             let attacker_clan = self.entities[i].downed_by_clan;
-            let attacker_entity = self.entities[i].downed_by_entity;
             if let Some(rescuer_id) = self.entities[i].carried_by {
                 if let Some(rescuer) = self.entity_index(rescuer_id) {
                     self.entities[rescuer].rescue_target = None;
                 }
             }
+            self.drop_entity_resources(i);
             self.entities[i].dead = true;
-            let loot_food = self.entities[i].food + self.entities[i].trade_food;
-            let loot_wood = self.entities[i].wood + self.entities[i].trade_wood;
-            self.entities[i].food = 0;
-            self.entities[i].wood = 0;
-            self.entities[i].trade_food = 0;
-            self.entities[i].trade_wood = 0;
-            self.entities[i].trade_returning = false;
-            if let Some(attacker) = attacker_entity.and_then(|id| self.entity_index(id)) {
-                if self.entities[attacker].is_active() {
-                    self.entities[attacker].food += loot_food;
-                    self.entities[attacker].wood += loot_wood;
-                } else if let Some(ci) = self.clan_index(attacker_clan) {
-                    self.clans[ci].food += loot_food;
-                    self.clans[ci].wood += loot_wood;
-                }
-            } else if let Some(ci) = self.clan_index(attacker_clan) {
-                self.clans[ci].food += loot_food;
-                self.clans[ci].wood += loot_wood;
-            }
             self.deaths_combat += 1;
             if let Some(ci) = self.clan_index(victim_clan) {
                 self.clans[ci].stats.bleedouts += 1;
@@ -3619,12 +3833,15 @@ impl World {
             }
             let rescuer_id = entities[rescuer].id;
             let carrying = entities[patient].carried_by == Some(rescuer_id);
+            let patient_pos = (entities[patient].x, entities[patient].y);
             let target = if carrying {
                 self.clan_index(entities[patient].clan)
                     .and_then(|ci| self.clans[ci].stockpile)
-                    .unwrap_or((entities[patient].x, entities[patient].y))
+                    .unwrap_or(patient_pos)
             } else {
-                (entities[patient].x, entities[patient].y)
+                let dx = (patient_pos.0 - entities[rescuer].x).signum();
+                let dy = (patient_pos.1 - entities[rescuer].y).signum();
+                (patient_pos.0 - dx, patient_pos.1 - dy)
             };
             entities[rescuer].goal = Goal::Rescuing;
             let old_rescuer_pos = (entities[rescuer].x, entities[rescuer].y);
@@ -3632,6 +3849,9 @@ impl World {
             let distance = (entities[rescuer].x - target.0)
                 .abs()
                 .max((entities[rescuer].y - target.1).abs());
+            let patient_distance = (entities[rescuer].x - patient_pos.0)
+                .abs()
+                .max((entities[rescuer].y - patient_pos.1).abs());
             if carrying {
                 if (entities[rescuer].x, entities[rescuer].y) != old_rescuer_pos {
                     let old_patient = self.grid.idx(entities[patient].x, entities[patient].y);
@@ -3644,7 +3864,7 @@ impl World {
                 if distance <= 1 {
                     completed.push((patient, rescuer));
                 }
-            } else if distance <= 1 {
+            } else if patient_distance <= 1 {
                 entities[patient].carried_by = Some(rescuer_id);
                 if self.clan_index(entities[patient].clan).is_some_and(|ci| {
                     self.clans[ci].stockpile.is_some_and(|home| {
@@ -3842,6 +4062,7 @@ impl World {
                 let state = self.ensure_military_index(attacker_clan);
                 self.militaries[state].record_bonus_damage(weapon_bonus * downstream_factor);
             }
+            self.entities[j].goal = Goal::Fighting;
             self.entities[j].health -= applied_damage;
             if self.entities[j].health <= 0.0 {
                 if self.params.community_care && victim_clan >= 0 {
@@ -3854,16 +4075,8 @@ impl World {
                         self.clans[ci].stats.incapacitations += 1;
                     }
                 } else {
+                    self.drop_entity_resources(j);
                     self.entities[j].dead = true;
-                    let loot_food = self.entities[j].food + self.entities[j].trade_food;
-                    let loot_wood = self.entities[j].wood + self.entities[j].trade_wood;
-                    self.entities[j].food = 0;
-                    self.entities[j].wood = 0;
-                    self.entities[j].trade_food = 0;
-                    self.entities[j].trade_wood = 0;
-                    self.entities[j].trade_returning = false;
-                    self.entities[i].food += loot_food;
-                    self.entities[i].wood += loot_wood;
                     self.deaths_combat += 1;
                     if let Some(ci) = self.clan_index(attacker_clan) {
                         self.clans[ci].stats.kills += 1;
@@ -3956,14 +4169,17 @@ impl World {
                 self.entities[mi].clan = -1;
             }
         }
-        for building in self
+        let removed_buildings: Vec<_> = self
             .buildings
             .iter()
             .filter(|building| building.clan_id == id)
-        {
-            self.building_cells[self.grid.idx(building.x, building.y)] = 0;
+            .map(|building| (building.x, building.y, building.id))
+            .collect();
+        for (x, y, building_id) in removed_buildings {
+            self.clear_building_footprint(x, y, building_id);
         }
         self.buildings.retain(|building| building.clan_id != id);
+        self.rebuild_building_footprints();
         self.settlements.retain(|state| state.clan_id != id);
         self.militaries.retain(|state| state.clan_id != id);
     }
@@ -3980,14 +4196,33 @@ impl World {
             // Always consume exactly one roll per forest tile so paired on/off
             // worlds retain common random numbers despite different depletion.
             let regrows = self.rng.chance(regrow_chance);
-            if self.params.community_logistics && self.grid.wood[i] < FOREST_WOOD_CAP && regrows {
+            if self.params.community_logistics
+                && self.building_cells[i] == 0
+                && self.grid.wood[i] < FOREST_WOOD_CAP
+                && regrows
+            {
                 self.grid.wood[i] += 1;
             }
         }
     }
 
     fn plan_settlement_projects(&mut self) {
-        if !self.community_settlement || self.tick % SETTLEMENT_PLAN_INTERVAL != 0 {
+        if self.tick % SETTLEMENT_PLAN_INTERVAL != 0 {
+            return;
+        }
+        let destroyed: Vec<_> = self
+            .buildings
+            .iter()
+            .filter(|building| building.is_destroyed())
+            .map(|building| (building.x, building.y, building.id))
+            .collect();
+        if !destroyed.is_empty() {
+            for (x, y, id) in destroyed {
+                self.clear_building_footprint(x, y, id);
+            }
+            self.rebuild_building_footprints();
+        }
+        if !self.community_settlement {
             return;
         }
         let clan_ids: Vec<i32> = self
@@ -4036,9 +4271,29 @@ impl World {
             self.clans[clan_idx].wood -= cost.wood;
             let id = BuildingId(self.next_building_id);
             self.next_building_id = self.next_building_id.saturating_add(1);
-            self.building_cells[self.grid.idx(x, y)] = id.0;
+            self.reserve_building_footprint(x, y, id);
             self.buildings.push(Building::new(id, clan_id, x, y, kind));
             self.settlements[state_idx].build_target = Some(id);
+        }
+    }
+
+    /// Completed workshops provide steady civic research; an attending Scout
+    /// leader can still contribute an additional physical research tick.
+    fn advance_workshop_research(&mut self) {
+        if !self.community_settlement || self.tick % PASSIVE_RESEARCH_INTERVAL != 0 {
+            return;
+        }
+        let clan_ids: Vec<i32> = self
+            .buildings
+            .iter()
+            .filter(|building| building.kind == BuildingKind::Workshop && building.is_active())
+            .map(|building| building.clan_id)
+            .collect();
+        for clan_id in clan_ids {
+            let state_idx = self.ensure_settlement_index(clan_id);
+            self.settlements[state_idx].stats.research_ticks += 1;
+            let gained = self.settlements[state_idx].tech.add_research(1);
+            self.settlements[state_idx].stats.tech_levels_gained += gained as u32;
         }
     }
 
@@ -4170,17 +4425,33 @@ impl World {
         let mut best = None;
         for y in (home.1 - radius).max(0)..=(home.1 + radius).min(self.grid.size - 1) {
             for x in (home.0 - radius).max(0)..=(home.0 + radius).min(self.grid.size - 1) {
-                let index = self.grid.idx(x, y);
-                if (x, y) == home
-                    || self.grid.owner[index] != clan.id
-                    || !self.is_passable(x, y)
-                    || self.building_cells[index] != 0
-                    || self.grid.road[index] != 0
-                    || self.grid.wood[index] != 0
-                    || self.grid.pellet[index] != 0
+                if x < 1
+                    || y < 1
+                    || x >= self.grid.size - 1
+                    || y >= self.grid.size - 1
+                    || self.grid.owner[self.grid.idx(x, y)] != clan.id
                 {
                     continue;
                 }
+                let footprint_clear =
+                    building_footprint_cells(self.grid.size, x, y).all(|(fx, fy)| {
+                        let index = self.grid.idx(fx, fy);
+                        (fx, fy) != home
+                            && self.is_passable(fx, fy)
+                            && self.building_cells[index] == 0
+                            && self.grid.road[index] == 0
+                            && self.grid.wood[index] == 0
+                            && self.grid.pellet[index] == 0
+                            && !self.buildings.iter().any(|building| {
+                                !building.is_destroyed()
+                                    && (building.x - fx).abs() <= 1
+                                    && (building.y - fy).abs() <= 1
+                            })
+                    });
+                if !footprint_clear {
+                    continue;
+                }
+                let index = self.grid.idx(x, y);
                 let distance = (x - home.0).abs().max((y - home.1).abs());
                 let key = (distance, index);
                 if best.is_none_or(|(current, _, _)| key < current) {
@@ -4210,8 +4481,15 @@ impl World {
             self.settlements[state_idx].build_target = None;
             return false;
         };
-        if self.buildings[building_idx].is_destroyed() || self.buildings[building_idx].is_complete()
-        {
+        if self.buildings[building_idx].is_destroyed() {
+            let building = &self.buildings[building_idx];
+            let (x, y, id) = (building.x, building.y, building.id);
+            self.clear_building_footprint(x, y, id);
+            self.rebuild_building_footprints();
+            self.settlements[state_idx].build_target = None;
+            return false;
+        }
+        if self.buildings[building_idx].is_complete() {
             self.settlements[state_idx].build_target = None;
             return false;
         }
@@ -4305,7 +4583,10 @@ impl World {
         }
         let mut best: Vec<Option<(u16, usize)>> = vec![None; self.clans.len()];
         for i in 0..self.grid.owner.len() {
-            if self.grid.road[i] > 0 || self.grid.traffic[i] < ROAD_MIN_TRAFFIC {
+            if self.grid.road[i] > 0
+                || self.building_cells[i] != 0
+                || self.grid.traffic[i] < ROAD_MIN_TRAFFIC
+            {
                 continue;
             }
             let Some(&ci) = clan_by_id.get(&self.grid.owner[i]) else {
@@ -4322,7 +4603,10 @@ impl World {
             let Some((_, i)) = candidate else {
                 continue;
             };
-            if self.clans[ci].wood < ROAD_WOOD_COST || self.grid.road[i] > 0 {
+            if self.clans[ci].wood < ROAD_WOOD_COST
+                || self.grid.road[i] > 0
+                || self.building_cells[i] != 0
+            {
                 continue;
             }
             self.clans[ci].wood -= ROAD_WOOD_COST;
@@ -4539,7 +4823,8 @@ impl World {
             } else {
                 1.0
             };
-            if self.rng.f32() < yield_rate * fert * soil {
+            let grows = self.rng.f32() < yield_rate * fert * soil;
+            if self.building_cells[i] == 0 && grows {
                 self.grid.pellet[i] = energy;
                 self.pellet_total += 1;
             }
@@ -4585,8 +4870,10 @@ impl World {
                 // so trees are the wilderness/bootstrap supply, not a free top-up
                 // for every clan's territory.
                 if self.grid.pellet[i] == 0 && self.grid.owner[i] == NO_OWNER {
-                    self.grid.pellet[i] = energy;
-                    self.pellet_total += 1;
+                    if self.building_cells[i] == 0 {
+                        self.grid.pellet[i] = energy;
+                        self.pellet_total += 1;
+                    }
                     spawned += 1;
                 }
             }
@@ -4646,6 +4933,14 @@ fn route_distance_sq(point: (i32, i32), start: (i32, i32), end: (i32, i32)) -> i
     let dx = point.0 as i64 * scale - projected_x;
     let dy = point.1 as i64 * scale - projected_y;
     (dx * dx + dy * dy) / (scale * scale)
+}
+
+fn detection_radius(base: i32, hidden: bool) -> i32 {
+    if hidden {
+        ((base.max(1) + 2) / 5).max(1)
+    } else {
+        base.max(1)
+    }
 }
 
 #[cfg(test)]
@@ -5136,6 +5431,15 @@ mod tests {
         world.plan_settlement_projects();
         assert_eq!(world.buildings.len(), 1);
         assert_eq!(world.buildings[0].kind, BuildingKind::Granary);
+        let building_id = world.buildings[0].id;
+        let footprint: Vec<_> =
+            building_footprint_cells(world.grid.size, world.buildings[0].x, world.buildings[0].y)
+                .map(|(x, y)| world.grid.idx(x, y))
+                .collect();
+        assert_eq!(footprint.len(), 9);
+        assert!(footprint
+            .iter()
+            .all(|&cell| world.building_cells[cell] == building_id.0));
         assert_eq!(
             world.clans[0].wood, SETTLEMENT_WOOD_MARGIN,
             "wood is reserved exactly once when the site opens"
@@ -5158,10 +5462,14 @@ mod tests {
         }
         assert!(world.buildings[0].is_complete());
         assert_eq!(world.settlements[0].stats.buildings_completed, 1);
+        world.disband_clan(0);
+        assert!(footprint
+            .iter()
+            .all(|&cell| world.building_cells[cell] == 0));
     }
 
     #[test]
-    fn workshop_allows_physical_scout_research_from_tech_zero() {
+    fn workshop_passively_researches_and_physical_scouts_accelerate_it() {
         let mut world = settlement_test_world();
         let clan_id = world.clans[0].id;
         let home = world.clans[0].stockpile.unwrap();
@@ -5174,7 +5482,7 @@ mod tests {
         );
         world.next_building_id += 1;
         workshop.add_construction(BuildingKind::Workshop.cost().work);
-        world.building_cells[world.grid.idx(workshop.x, workshop.y)] = workshop.id.0;
+        world.reserve_building_footprint(workshop.x, workshop.y, workshop.id);
         world.buildings.push(workshop);
         let leader = world.entity_index(world.clans[0].leader_id).unwrap();
         let mut entities = std::mem::take(&mut world.entities);
@@ -5185,13 +5493,95 @@ mod tests {
         researcher.y = home.1;
         researcher.work_role = ClanMode::Scout;
 
-        for _ in 0..40 {
+        world.tick = PASSIVE_RESEARCH_INTERVAL - 1;
+        world.advance_workshop_research();
+        assert!(world.settlements.is_empty());
+        world.tick = PASSIVE_RESEARCH_INTERVAL;
+        world.advance_workshop_research();
+        assert_eq!(world.settlements[0].stats.research_ticks, 1);
+
+        for _ in 0..39 {
             world.tick += RESEARCH_INTERVAL;
             assert!(world.handle_research(&mut researcher, 0));
         }
 
         assert_eq!(world.settlement_tech(clan_id).level, 1);
         assert_eq!(world.settlements[0].stats.research_ticks, 40);
+    }
+
+    #[test]
+    fn default_healing_cannot_erase_one_unarmed_hit_per_cooldown() {
+        assert_eq!(D_HEAL_RATE, 0.008);
+        assert!(D_HEAL_RATE * (D_ATTACK_COOLDOWN as f32) < D_ATTACK_DAMAGE);
+    }
+
+    #[test]
+    fn building_footprint_blocks_food_and_road_production() {
+        let mut world = settlement_test_world();
+        let clan_id = world.clans[0].id;
+        let (x, y) = world.settlement_site(0).unwrap();
+        let mut building = Building::new(
+            BuildingId(world.next_building_id),
+            clan_id,
+            x,
+            y,
+            BuildingKind::House,
+        );
+        world.next_building_id += 1;
+        building.add_construction(building.kind.cost().work);
+        world.reserve_building_footprint(x, y, building.id);
+        world.buildings.push(building);
+        let footprint: Vec<_> = building_footprint_cells(world.grid.size, x, y)
+            .map(|(cell_x, cell_y)| world.grid.idx(cell_x, cell_y))
+            .collect();
+        for &cell in &footprint {
+            world.grid.owner[cell] = clan_id;
+            world.grid.terrain[cell] = terrain::PLAINS;
+            world.grid.fertility[cell] = u8::MAX;
+            world.grid.pellet[cell] = 0;
+            world.grid.road[cell] = 0;
+            world.grid.traffic[cell] = 0;
+        }
+
+        world.params.farm_interval = 1;
+        world.params.farm_yield = 1.0;
+        world.params.max_pellet_fraction = 1.0;
+        world.params.season_length = 0;
+        world.tick = 1;
+        world.grow_farms();
+        assert!(footprint.iter().all(|&cell| world.grid.pellet[cell] == 0));
+
+        let blocked = footprint[0];
+        world.grid.traffic[blocked] = ROAD_MIN_TRAFFIC + 10;
+        world.clans[0].wood = ROAD_WOOD_COST;
+        world.tick = ROAD_BUILD_INTERVAL;
+        world.build_roads();
+        assert_eq!(world.grid.road[blocked], 0);
+        assert_eq!(world.clans[0].wood, ROAD_WOOD_COST);
+
+        let tree_x = blocked as i32 % world.grid.size;
+        let tree_y = blocked as i32 / world.grid.size;
+        world.grid.owner[blocked] = NO_OWNER;
+        world.params.tree_interval = 1;
+        world.params.tree_per_cycle = 1;
+        world.params.tree_radius = 0;
+        world.trees = vec![Tree {
+            x: tree_x,
+            y: tree_y,
+            last_spawn: 0,
+            destroyed: false,
+        }];
+        world.tick = 1;
+        world.update_trees();
+        assert_eq!(world.grid.pellet[blocked], 0);
+
+        world.grid.terrain[blocked] = terrain::FOREST;
+        world.grid.wood[blocked] = 0;
+        for cycle in 1..=256 {
+            world.tick = cycle * WOOD_REGROW_INTERVAL;
+            world.regrow_wood();
+        }
+        assert_eq!(world.grid.wood[blocked], 0);
     }
 
     #[test]
@@ -5209,7 +5599,7 @@ mod tests {
             );
             world.next_building_id += 1;
             building.add_construction(kind.cost().work);
-            world.building_cells[world.grid.idx(building.x, building.y)] = building.id.0;
+            world.reserve_building_footprint(building.x, building.y, building.id);
             world.buildings.push(building);
         }
         let base_cap = {
@@ -5251,7 +5641,7 @@ mod tests {
         );
         world.next_building_id += 1;
         workshop.add_construction(workshop.kind.cost().work);
-        world.building_cells[world.grid.idx(workshop.x, workshop.y)] = workshop.id.0;
+        world.reserve_building_footprint(workshop.x, workshop.y, workshop.id);
         world.buildings.push(workshop);
         let pop = world.clan_roster_size(0);
         world.clans[0].food = pop * STOCKPILE_FOOD_PER_MEMBER;
@@ -5422,7 +5812,7 @@ mod tests {
         );
         world.next_building_id += 1;
         workshop.add_construction(workshop.kind.cost().work);
-        world.building_cells[world.grid.idx(workshop.x, workshop.y)] = workshop.id.0;
+        world.reserve_building_footprint(workshop.x, workshop.y, workshop.id);
         world.buildings.push(workshop);
         world.clans[0].food = 0;
         world.clans[0].reserve_food = 0;
@@ -5505,6 +5895,93 @@ mod tests {
             .all(|state| state.clan_id != clan_id));
     }
 
+    #[test]
+    fn ground_loot_is_physical_persistent_and_stealable() {
+        let mut world = World::new(12, 77);
+        let mut victim = world.make_entity(4, 5, false);
+        victim.food = 3;
+        victim.wood = 2;
+        victim.trade_food = 4;
+        victim.trade_wood = 1;
+        assert_eq!(add_entity_ore(&mut world.ore_cargo, victim.id, 6), 6);
+        world.drop_detached_entity_resources(&mut victim);
+        assert_eq!(victim.food, 0);
+        assert_eq!(victim.wood, 0);
+        assert_eq!(world.ground_loot.len(), 1);
+        assert_eq!(world.ground_loot[0].food, 7);
+        assert_eq!(world.ground_loot[0].wood, 3);
+        assert_eq!(world.ground_loot[0].ore, 6);
+
+        let mut thief = world.make_entity(4, 5, false);
+        world.collect_ground_loot(&mut thief);
+        assert_eq!((thief.food, thief.wood), (7, 3));
+        assert_eq!(ore_cargo_for(&world.ore_cargo, thief.id).unwrap().ore, 6);
+        assert!(world.ground_loot.is_empty());
+    }
+
+    #[test]
+    fn cells_accept_three_units_and_reject_a_fourth() {
+        let mut world = World::new(8, 91);
+        for _ in 0..4 {
+            world.spawn_entity(3, 3, false);
+        }
+        assert_eq!(
+            world
+                .entities
+                .iter()
+                .filter(|entity| (entity.x, entity.y) == (3, 3))
+                .count(),
+            3
+        );
+        let entities = world.entities.clone();
+        world.rebuild_occupancy(&entities);
+        assert_eq!(world.occupied[world.grid.idx(3, 3)], MAX_ENTITIES_PER_CELL);
+    }
+
+    #[test]
+    fn saturated_spawn_fallback_does_not_create_a_fourth_unit() {
+        let mut world = World::new(2, 92);
+        for y in 0..world.grid.size {
+            for x in 0..world.grid.size {
+                for _ in 0..MAX_ENTITIES_PER_CELL {
+                    world.spawn_entity(x, y, false);
+                }
+            }
+        }
+        let population = world.population();
+        assert!(world.random_land_cell().is_none());
+        assert!(!world.spawn_clan());
+        assert_eq!(world.population(), population);
+    }
+
+    #[test]
+    fn defend_workers_hide_statically_and_cut_detection_to_twenty_percent() {
+        assert_eq!(detection_radius(15, true), 3);
+        assert_eq!(detection_radius(15, false), 15);
+        assert_eq!(detection_radius(12, true), 2);
+        assert_eq!(detection_radius(17, true), 3);
+        assert_eq!(detection_radius(1, true), 1);
+        let mut world = settlement_test_world();
+        let clan_id = world.clans[0].id;
+        let worker = world
+            .entities
+            .iter()
+            .position(|entity| entity.clan == clan_id && !entity.is_leader)
+            .unwrap();
+        let home = world.clans[0].stockpile.unwrap();
+        let mut entity = world.entities.remove(worker);
+        entity.x = home.0;
+        entity.y = home.1;
+        entity.food = 0;
+        entity.wood = 0;
+        entity.health = entity.max_health * 0.5;
+        entity.work_role = ClanMode::Defend;
+        world.clans[0].trade_partner = Some(clan_id + 1);
+        world.defend(&mut entity, 0);
+        assert_eq!((entity.x, entity.y), home);
+        assert_eq!(entity.goal, Goal::Hiding);
+    }
+
     fn settlement_test_world() -> World {
         let mut world = World::new(40, 0x5E77_1E);
         world.populate(0, 0, 1);
@@ -5513,12 +5990,14 @@ mod tests {
         let direction = if home.0 + 3 < world.grid.size { 1 } else { -1 };
         for dx in 1..=3 {
             let x = home.0 + direction * dx;
-            let index = world.grid.idx(x, home.1);
-            world.grid.owner[index] = clan_id;
-            world.grid.terrain[index] = terrain::PLAINS;
-            world.grid.pellet[index] = 0;
-            world.grid.wood[index] = 0;
-            world.grid.road[index] = 0;
+            for dy in -1..=1 {
+                let index = world.grid.idx(x, home.1 + dy);
+                world.grid.owner[index] = clan_id;
+                world.grid.terrain[index] = terrain::PLAINS;
+                world.grid.pellet[index] = 0;
+                world.grid.wood[index] = 0;
+                world.grid.road[index] = 0;
+            }
         }
         world.clans[0].workforce[ClanMode::Expand.index()] = 1;
         let worker = world
@@ -5666,10 +6145,8 @@ mod tests {
 
         assert!(courier.dead);
         assert_eq!(courier.trade_target_clan, -1);
-        assert_eq!(
-            world.clans[donor_idx].food + world.clans[donor_idx].wood,
-            cargo
-        );
+        assert_eq!(world.clans[donor_idx].food + world.clans[donor_idx].wood, 0);
+        assert_eq!(world.ground_loot[0].food + world.ground_loot[0].wood, cargo);
     }
 
     #[test]
@@ -5889,9 +6366,18 @@ mod tests {
         world.entities[rescuer].y = home.1;
         world.entities[rescuer].work_role = ClanMode::Defend;
         world.entities[rescuer].speed = 1.0;
+        for (index, entity) in world.entities.iter_mut().enumerate() {
+            if index != casualty
+                && index != rescuer
+                && entity.y == home.1
+                && (entity.x - home.0).abs() <= 6
+            {
+                entity.y = world.grid.clamp(home.1 + 3);
+            }
+        }
 
         let mut patient_positions = Vec::new();
-        for _ in 0..12 {
+        for _ in 0..30 {
             world.prepare_rescues();
             for entity in &mut world.entities {
                 if entity.rescue_target.is_some() {
@@ -5931,7 +6417,8 @@ mod tests {
         assert!(disabled.entities[casualty].dead);
         assert_eq!(disabled.deaths_combat, 1);
         assert_eq!(disabled.clans[0].stats.kills, 1);
-        assert_eq!(disabled.entities[attacker].food, 2);
+        assert_eq!(disabled.entities[attacker].food, 0);
+        assert_eq!(disabled.ground_loot[0].food, 2);
 
         let (mut enabled, attacker, casualty, _) = care_combat_world(true);
         enabled.entities[casualty].food = 2;
@@ -5942,7 +6429,8 @@ mod tests {
         assert_eq!(enabled.deaths_combat, 1);
         assert_eq!(enabled.clans[1].stats.bleedouts, 1);
         assert_eq!(enabled.clans[0].stats.kills, 1);
-        assert_eq!(enabled.entities[attacker].food, 2);
+        assert_eq!(enabled.entities[attacker].food, 0);
+        assert_eq!(enabled.ground_loot[0].food, 2);
     }
 
     fn care_combat_world(community_care: bool) -> (World, usize, usize, usize) {

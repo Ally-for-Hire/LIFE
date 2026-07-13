@@ -58,6 +58,38 @@ impl ContextualSpecializationMetrics {
             && self.contextual_top1_coverage >= MIN_SPECIALIZATION_TOP1_COVERAGE
             && self.expert_output_divergence >= MIN_SPECIALIZATION_OUTPUT_DIVERGENCE
     }
+
+    /// Continuous distance to the same five-part qualification contract. This is
+    /// training guidance only: zero means every exact threshold passes, while a
+    /// finite positive value lets a promotion proxy distinguish near-passes from
+    /// collapsed routers without weakening the boolean release gate.
+    #[cfg(test)]
+    pub(crate) fn qualification_deficit(self) -> f32 {
+        fn shortfall(value: f32, floor: f32) -> f32 {
+            if !value.is_finite() {
+                return 1000.0;
+            }
+            ((floor - value).max(0.0) / floor.max(0.01)).min(1000.0)
+        }
+
+        (shortfall(
+            self.utilization_balance,
+            MIN_SPECIALIZATION_UTILIZATION_BALANCE,
+        ) + shortfall(self.decisiveness, MIN_SPECIALIZATION_DECISIVENESS)
+            + shortfall(
+                self.contextual_mutual_information,
+                MIN_SPECIALIZATION_MUTUAL_INFORMATION,
+            )
+            + shortfall(
+                self.contextual_top1_coverage,
+                MIN_SPECIALIZATION_TOP1_COVERAGE,
+            )
+            + shortfall(
+                self.expert_output_divergence,
+                MIN_SPECIALIZATION_OUTPUT_DIVERGENCE,
+            ))
+        .min(5000.0)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

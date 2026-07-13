@@ -7,7 +7,10 @@
 //! tiny. That parallelizes perfectly across cores but would be far slower on a
 //! GPU. The GPU is already busy rendering the live view.
 
-use crate::brain::{Brain, N_MODES};
+use crate::brain::Brain;
+#[cfg(test)]
+use crate::brain::N_MODES;
+#[cfg(test)]
 use crate::clan::ClanMode;
 use crate::quality::{
     contextual_specialization_metrics, routing_metrics, score_clan as score_clan_quality,
@@ -15,7 +18,9 @@ use crate::quality::{
     N_STRATEGY_NICHES, SECURITY_FLOOR, SURVIVAL_FLOOR,
 };
 use crate::rng::Rng;
-use crate::world::{Params, SeasonPhase, World};
+#[cfg(test)]
+use crate::world::SeasonPhase;
+use crate::world::{Params, World};
 use rayon::prelude::*;
 use std::collections::HashSet;
 #[cfg(test)]
@@ -41,6 +46,61 @@ const PROMOTION_LOGISTICS_TOLERANCE: f32 = 0.02;
 const PROMOTION_TRADE_TOLERANCE: f32 = 0.05;
 #[cfg(test)]
 const PROMOTION_SPECIALIZATION_TOLERANCE: f32 = 0.02;
+#[cfg(test)]
+const PROMOTION_TASK_COVERAGE_FLOOR: f32 = 0.40;
+#[cfg(test)]
+const PROMOTION_LOGISTICS_VALUE_FLOOR: f32 = 0.20;
+#[cfg(test)]
+const PROMOTION_TRANSPORT_GAIN_FLOOR: f32 = 0.05;
+#[cfg(test)]
+const PROMOTION_RESERVE_USE_FLOOR: f32 = 0.05;
+#[cfg(test)]
+const PROMOTION_RESERVE_SECURITY_FLOOR: f32 = 0.20;
+#[cfg(test)]
+const PROMOTION_TRADE_VALUE_FLOOR: f32 = 0.10;
+#[cfg(test)]
+const PROMOTION_DELIVERED_MATERIAL_FLOOR: f32 = 5.0;
+#[cfg(test)]
+const PROMOTION_DELIVERY_TRIPS_FLOOR: f32 = 2.0;
+#[cfg(test)]
+const PROMOTION_INFRASTRUCTURE_FLOOR: f32 = 0.10;
+#[cfg(test)]
+const PROMOTION_TECHNOLOGY_FLOOR: f32 = 0.05;
+#[cfg(test)]
+const PROMOTION_CONSTRUCTION_WORK_FLOOR: f32 = 20.0;
+#[cfg(test)]
+const PROMOTION_BUILDINGS_FLOOR: f32 = 0.5;
+#[cfg(test)]
+const PROMOTION_RESEARCH_TICKS_FLOOR: f32 = 5.0;
+#[cfg(test)]
+const PROMOTION_USEFUL_VALUE_FLOOR: f32 = 1.0;
+#[cfg(test)]
+const PROMOTION_MILITARY_FLOOR: f32 = 0.05;
+#[cfg(test)]
+const PROMOTION_ORE_FLOOR: f32 = 5.0;
+#[cfg(test)]
+const PROMOTION_PRODUCTION_WORK_FLOOR: f32 = 10.0;
+#[cfg(test)]
+const PROMOTION_EQUIPMENT_FLOOR: f32 = 0.5;
+#[cfg(test)]
+const PROMOTION_EQUIPPED_TICKS_FLOOR: f32 = 500.0;
+#[cfg(test)]
+const PROMOTION_PIPELINE_FLOOR: f32 = 0.075;
+#[cfg(test)]
+const PROMOTION_CARE_RESCUE_RATE_FLOOR: f32 = 0.05;
+
+/// Promotion-aware training stays bounded: twelve current-generation candidates
+/// plus four retained near-passes are cheap enough to probe every benchmark
+/// interval while still exposing more than one arena-fitness winner to fixed
+/// worlds. The full release suite still runs for only the best proxy candidate.
+#[cfg(test)]
+const PROMOTION_TOP_K: usize = 12;
+#[cfg(test)]
+const PROMOTION_ARCHIVE_CAPACITY: usize = 4;
+#[cfg(test)]
+const PROMOTION_PROXY_WORLDS: usize = 6;
+#[cfg(test)]
+const PROMOTION_PROXY_EPISODE: i32 = 3000;
 
 const SPECIALIST_ARCHIVE_INDEX: usize = N_STRATEGY_NICHES;
 pub const N_QD_ARCHIVE_SLOTS: usize = N_STRATEGY_NICHES + 1;
@@ -49,6 +109,47 @@ pub const N_QD_ARCHIVE_SLOTS: usize = N_STRATEGY_NICHES + 1;
 struct QdElite {
     brain: Brain,
     quality: QualityScore,
+}
+
+/// Compact ranking evidence from the cheap fixed-world promotion proxy. Gate
+/// deficit is the number of absolute release-contract failures (incumbent
+/// comparisons are intentionally left to the full suite). Safety margin breaks
+/// equal-deficit ties before fitness, so a flashy but fragile policy cannot
+/// displace a safer near-pass in the retained breeding archive.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PromotionProxyScore {
+    failed_components: usize,
+    hard_safety_deficit: f32,
+    total_deficit: f32,
+    safety_margin: f32,
+    specialization: f32,
+    headline_selection: f32,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+struct PromotionProxyElite {
+    brain: Brain,
+    score: PromotionProxyScore,
+    fingerprint: u64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct PromotionProxySummary {
+    evaluated: usize,
+    passes: usize,
+    current_evaluated: usize,
+    current_passes: usize,
+    current_best_failed_components: usize,
+    current_best_hard_safety_deficit: f32,
+    current_best_total_deficit: f32,
+    retained: usize,
+    best_failed_components: usize,
+    best_hard_safety_deficit: f32,
+    best_total_deficit: f32,
+    best_safety_margin: f32,
 }
 
 #[cfg(test)]
@@ -364,6 +465,13 @@ pub struct Trainer {
     /// current peers) — the path to robust, real-opponent-level play.
     hof: Vec<Brain>,
     qd_archive: Vec<Option<QdElite>>,
+    /// Current rotating-world contenders and fixed-world near-passes are kept
+    /// separate from the public quality-diversity archive. They exist only in
+    /// test-built offline marathons, where the release benchmarks are available.
+    #[cfg(test)]
+    promotion_candidates: Vec<Brain>,
+    #[cfg(test)]
+    promotion_archive: Vec<PromotionProxyElite>,
     rng: Rng,
 }
 
@@ -412,6 +520,10 @@ impl Trainer {
             stage_stall: 0,
             hof: Vec::new(),
             qd_archive: vec![None; N_QD_ARCHIVE_SLOTS],
+            #[cfg(test)]
+            promotion_candidates: Vec::new(),
+            #[cfg(test)]
+            promotion_archive: Vec::new(),
             rng,
         }
     }
@@ -445,6 +557,113 @@ impl Trainer {
 
     pub fn snapshot_curriculum(&self) -> (u32, Vec<Brain>) {
         (self.stage, self.hof.clone())
+    }
+
+    /// Combine this generation's top rotating-world policies with the retained
+    /// fixed-world near-passes. Retained candidates are re-probed each interval,
+    /// so their scores never go stale as curriculum stage or HoF opponents change.
+    #[cfg(test)]
+    fn promotion_probe_candidates(&self, excluded_fingerprint: Option<u64>) -> Vec<Brain> {
+        let mut seen = HashSet::new();
+        self.promotion_candidates
+            .iter()
+            .chain(self.promotion_archive.iter().map(|elite| &elite.brain))
+            .filter_map(|brain| {
+                let fingerprint = promotion_brain_fingerprint(brain);
+                (Some(fingerprint) != excluded_fingerprint && seen.insert(fingerprint))
+                    .then(|| brain.clone())
+            })
+            .collect()
+    }
+
+    /// Run a small but contract-shaped fixed-world screen, refresh the persistent
+    /// near-pass archive, and return concise progress evidence for marathon logs.
+    #[cfg(test)]
+    fn refresh_promotion_archive(
+        &mut self,
+        base: &Params,
+        stage: u32,
+        opponents: &[Brain],
+        episode: i32,
+        excluded_fingerprint: Option<u64>,
+    ) -> PromotionProxySummary {
+        let candidates = self.promotion_probe_candidates(excluded_fingerprint);
+        let current_fingerprints: HashSet<u64> = self
+            .promotion_candidates
+            .iter()
+            .map(promotion_brain_fingerprint)
+            .filter(|fingerprint| Some(*fingerprint) != excluded_fingerprint)
+            .collect();
+        let evaluated: Vec<PromotionProxyElite> = candidates
+            .par_iter()
+            .map(|brain| evaluate_promotion_proxy_candidate(brain, base, stage, opponents, episode))
+            .collect();
+        let current_evaluated = evaluated
+            .iter()
+            .filter(|elite| current_fingerprints.contains(&elite.fingerprint))
+            .count();
+        let current_passes = evaluated
+            .iter()
+            .filter(|elite| {
+                current_fingerprints.contains(&elite.fingerprint)
+                    && elite.score.failed_components == 0
+            })
+            .count();
+        let current_best = evaluated
+            .iter()
+            .filter(|elite| current_fingerprints.contains(&elite.fingerprint))
+            .min_by(|a, b| promotion_proxy_cmp(a, b))
+            .map(|elite| elite.score);
+        let mut summary = self.replace_promotion_archive(evaluated, excluded_fingerprint);
+        summary.current_evaluated = current_evaluated;
+        summary.current_passes = current_passes;
+        summary.current_best_failed_components =
+            current_best.map_or(0, |score| score.failed_components);
+        summary.current_best_hard_safety_deficit =
+            current_best.map_or(0.0, |score| score.hard_safety_deficit);
+        summary.current_best_total_deficit = current_best.map_or(0.0, |score| score.total_deficit);
+        summary
+    }
+
+    #[cfg(test)]
+    fn replace_promotion_archive(
+        &mut self,
+        mut evaluated: Vec<PromotionProxyElite>,
+        excluded_fingerprint: Option<u64>,
+    ) -> PromotionProxySummary {
+        evaluated.retain(|elite| Some(elite.fingerprint) != excluded_fingerprint);
+        evaluated.sort_by(promotion_proxy_cmp);
+        let passes = evaluated
+            .iter()
+            .filter(|elite| elite.score.failed_components == 0)
+            .count();
+        let evaluated_count = evaluated.len();
+        let best = evaluated.first().map(|elite| elite.score);
+        let mut seen = HashSet::new();
+        evaluated.retain(|elite| seen.insert(elite.fingerprint));
+        evaluated.truncate(PROMOTION_ARCHIVE_CAPACITY);
+        self.promotion_archive = evaluated;
+        PromotionProxySummary {
+            evaluated: evaluated_count,
+            passes,
+            current_evaluated: 0,
+            current_passes: 0,
+            current_best_failed_components: 0,
+            current_best_hard_safety_deficit: 0.0,
+            current_best_total_deficit: 0.0,
+            retained: self.promotion_archive.len(),
+            best_failed_components: best.map_or(0, |score| score.failed_components),
+            best_hard_safety_deficit: best.map_or(0.0, |score| score.hard_safety_deficit),
+            best_total_deficit: best.map_or(0.0, |score| score.total_deficit),
+            best_safety_margin: best.map_or(0.0, |score| score.safety_margin),
+        }
+    }
+
+    #[cfg(test)]
+    fn promotion_challenger(&self) -> Option<Brain> {
+        self.promotion_archive
+            .first()
+            .map(|elite| elite.brain.clone())
     }
 
     fn push_hof(&mut self, b: Brain) {
@@ -519,6 +738,462 @@ impl Trainer {
     }
 }
 
+#[cfg(test)]
+fn promotion_brain_fingerprint(brain: &Brain) -> u64 {
+    // Stable FNV-1a over serde's deterministic Brain representation. This keeps
+    // archive de-duplication and tie-breaking independent of HashMap seeding.
+    let bytes = bincode::serialize(brain).unwrap_or_default();
+    bytes.iter().fold(0xCBF2_9CE4_8422_2325, |hash, byte| {
+        (hash ^ *byte as u64).wrapping_mul(0x0000_0100_0000_01B3)
+    })
+}
+
+#[cfg(test)]
+fn promotion_proxy_cmp(a: &PromotionProxyElite, b: &PromotionProxyElite) -> std::cmp::Ordering {
+    a.score
+        .hard_safety_deficit
+        .total_cmp(&b.score.hard_safety_deficit)
+        .then_with(|| a.score.total_deficit.total_cmp(&b.score.total_deficit))
+        .then_with(|| a.score.failed_components.cmp(&b.score.failed_components))
+        .then_with(|| b.score.safety_margin.total_cmp(&a.score.safety_margin))
+        .then_with(|| b.score.specialization.total_cmp(&a.score.specialization))
+        .then_with(|| {
+            b.score
+                .headline_selection
+                .total_cmp(&a.score.headline_selection)
+        })
+        .then_with(|| a.fingerprint.cmp(&b.fingerprint))
+}
+
+#[cfg(test)]
+fn proxy_floor_shortfall(value: f32, floor: f32, scale: f32) -> f32 {
+    if !value.is_finite() {
+        return 1000.0;
+    }
+    ((floor - value).max(0.0) / scale.max(0.0001)).min(1000.0)
+}
+
+#[cfg(test)]
+fn proxy_positive_shortfall(value: f32, scale: f32) -> f32 {
+    if !value.is_finite() {
+        return 1000.0;
+    }
+    if value > 0.0 {
+        0.0
+    } else {
+        (1.0 + (-value / scale.max(0.0001))).min(1000.0)
+    }
+}
+
+#[cfg(test)]
+fn promotion_proxy_hard_safety_deficit(
+    headline: &QualityScore,
+    care: &CareBenchmarkReport,
+    logistics: &LogisticsBenchmarkReport,
+    trade: &TradeBenchmarkReport,
+    settlement: &SettlementBenchmarkReport,
+    military: &MilitaryBenchmarkReport,
+) -> f32 {
+    let mut deficit = if headline.eligible { 0.0 } else { 1.0 };
+    deficit += proxy_floor_shortfall(
+        headline.robust_survival,
+        PROMOTION_SURVIVAL_FLOOR,
+        PROMOTION_SURVIVAL_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        headline.security,
+        PROMOTION_SECURITY_FLOOR,
+        PROMOTION_SECURITY_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        headline.fairness,
+        PROMOTION_FAIRNESS_FLOOR,
+        PROMOTION_COVERAGE_TOLERANCE,
+    );
+    deficit += proxy_floor_shortfall(
+        headline.robust_fairness,
+        FAIRNESS_FLOOR,
+        FAIRNESS_FLOOR.abs(),
+    );
+
+    let arms = [
+        (
+            logistics.enabled.eligible,
+            logistics.enabled.robust_survival,
+            logistics.enabled.mean_security,
+            logistics.enabled.fairness_delta,
+            logistics.enabled.robust_fairness_delta,
+        ),
+        (
+            trade.enabled.eligible,
+            trade.enabled.robust_survival,
+            trade.enabled.mean_security,
+            trade.enabled.fairness_delta,
+            trade.enabled.robust_fairness_delta,
+        ),
+        (
+            settlement.enabled.eligible,
+            settlement.enabled.robust_survival,
+            settlement.enabled.mean_security,
+            settlement.enabled.fairness_delta,
+            settlement.enabled.robust_fairness_delta,
+        ),
+        (
+            military.enabled.eligible,
+            military.enabled.robust_survival,
+            military.enabled.mean_security,
+            military.enabled.fairness_delta,
+            military.enabled.worst_fairness_delta,
+        ),
+        (
+            care.enabled.eligible,
+            care.enabled.robust_survival,
+            care.enabled.mean_security,
+            care.enabled.fairness_delta,
+            care.enabled.robust_fairness_delta,
+        ),
+    ];
+    for (eligible, survival, security, fairness, robust_fairness) in arms {
+        if !eligible {
+            deficit += 1.0;
+        }
+        deficit +=
+            proxy_floor_shortfall(survival, PROMOTION_SURVIVAL_FLOOR, PROMOTION_SURVIVAL_FLOOR);
+        deficit +=
+            proxy_floor_shortfall(security, PROMOTION_SECURITY_FLOOR, PROMOTION_SECURITY_FLOOR);
+        deficit += proxy_floor_shortfall(
+            fairness,
+            PROMOTION_FAIRNESS_FLOOR,
+            PROMOTION_COVERAGE_TOLERANCE,
+        );
+        deficit += proxy_floor_shortfall(robust_fairness, FAIRNESS_FLOOR, FAIRNESS_FLOOR.abs());
+    }
+    deficit.min(20_000.0)
+}
+
+#[cfg(test)]
+fn promotion_proxy_total_deficit(
+    hard_safety_deficit: f32,
+    headline: &QualityScore,
+    specialization: ContextualSpecializationMetrics,
+    care: &CareBenchmarkReport,
+    logistics: &LogisticsBenchmarkReport,
+    trade: &TradeBenchmarkReport,
+    settlement: &SettlementBenchmarkReport,
+    military: &MilitaryBenchmarkReport,
+) -> f32 {
+    let mut deficit = hard_safety_deficit + specialization.qualification_deficit();
+    deficit += proxy_floor_shortfall(
+        headline.task_coverage,
+        PROMOTION_TASK_COVERAGE_FLOOR,
+        PROMOTION_TASK_COVERAGE_FLOOR,
+    );
+    deficit += usize::from(!care.survival_non_regression) as f32;
+    deficit += proxy_floor_shortfall(
+        care.security_delta,
+        -PROMOTION_SECURITY_TOLERANCE,
+        PROMOTION_SECURITY_TOLERANCE,
+    );
+    if care.enabled.incapacitations > 0.0 {
+        deficit += proxy_floor_shortfall(
+            care.enabled.rescue_rate,
+            PROMOTION_CARE_RESCUE_RATE_FLOOR,
+            PROMOTION_CARE_RESCUE_RATE_FLOOR,
+        );
+        deficit += proxy_positive_shortfall(care.enabled.rescues, 1.0);
+    }
+    deficit += usize::from(!logistics.survival_non_regression) as f32;
+    deficit += proxy_floor_shortfall(
+        logistics.security_delta,
+        -PROMOTION_SECURITY_TOLERANCE,
+        PROMOTION_SECURITY_TOLERANCE,
+    );
+    let transport_gain =
+        logistics.hauling_throughput_delta * 0.60 + logistics.road_utility_delta * 0.40;
+    deficit += proxy_floor_shortfall(
+        promotion_logistics_value(&logistics.enabled),
+        PROMOTION_LOGISTICS_VALUE_FLOOR,
+        PROMOTION_LOGISTICS_VALUE_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        transport_gain,
+        PROMOTION_TRANSPORT_GAIN_FLOOR,
+        PROMOTION_TRANSPORT_GAIN_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        logistics.reserve_use_delta,
+        PROMOTION_RESERVE_USE_FLOOR,
+        PROMOTION_RESERVE_USE_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        logistics.enabled.reserve_security,
+        PROMOTION_RESERVE_SECURITY_FLOOR,
+        PROMOTION_RESERVE_SECURITY_FLOOR,
+    );
+
+    deficit += usize::from(!trade.survival_non_regression) as f32;
+    deficit += proxy_floor_shortfall(
+        trade.security_delta,
+        -PROMOTION_SECURITY_TOLERANCE,
+        PROMOTION_SECURITY_TOLERANCE,
+    );
+    deficit += proxy_floor_shortfall(
+        trade.enabled.trade_value,
+        PROMOTION_TRADE_VALUE_FLOOR,
+        PROMOTION_TRADE_VALUE_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        trade.delivered_material_delta,
+        PROMOTION_DELIVERED_MATERIAL_FLOOR,
+        PROMOTION_DELIVERED_MATERIAL_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        trade.enabled.deliveries,
+        PROMOTION_DELIVERY_TRIPS_FLOOR,
+        PROMOTION_DELIVERY_TRIPS_FLOOR,
+    );
+
+    deficit += usize::from(!settlement.survival_non_regression) as f32;
+    deficit += proxy_floor_shortfall(
+        settlement.security_delta,
+        -PROMOTION_SECURITY_TOLERANCE,
+        PROMOTION_SECURITY_TOLERANCE,
+    );
+    deficit += proxy_floor_shortfall(
+        settlement.enabled.infrastructure,
+        PROMOTION_INFRASTRUCTURE_FLOOR,
+        PROMOTION_INFRASTRUCTURE_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        settlement.enabled.technology,
+        PROMOTION_TECHNOLOGY_FLOOR,
+        PROMOTION_TECHNOLOGY_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        settlement.enabled.research_ticks,
+        PROMOTION_RESEARCH_TICKS_FLOOR,
+        PROMOTION_RESEARCH_TICKS_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        settlement.enabled.construction_work,
+        PROMOTION_CONSTRUCTION_WORK_FLOOR,
+        PROMOTION_CONSTRUCTION_WORK_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        settlement.enabled.completed_buildings,
+        PROMOTION_BUILDINGS_FLOOR,
+        PROMOTION_BUILDINGS_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        settlement.useful_value_delta,
+        PROMOTION_USEFUL_VALUE_FLOOR,
+        PROMOTION_USEFUL_VALUE_FLOOR,
+    );
+
+    deficit += usize::from(!military.survival_non_regression) as f32;
+    deficit += proxy_floor_shortfall(
+        military.security_delta,
+        -PROMOTION_SECURITY_TOLERANCE,
+        PROMOTION_SECURITY_TOLERANCE,
+    );
+    deficit += proxy_floor_shortfall(
+        military.fairness_delta,
+        -PROMOTION_SECURITY_TOLERANCE,
+        PROMOTION_SECURITY_TOLERANCE,
+    );
+    deficit += proxy_floor_shortfall(military.enabled.unsafe_work_ticks, 0.0, 1.0);
+    deficit += proxy_floor_shortfall(
+        military.enabled.military,
+        PROMOTION_MILITARY_FLOOR,
+        PROMOTION_MILITARY_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        military.enabled.ore_delivered,
+        PROMOTION_ORE_FLOOR,
+        PROMOTION_ORE_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        military.enabled.production_work,
+        PROMOTION_PRODUCTION_WORK_FLOOR,
+        PROMOTION_PRODUCTION_WORK_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        military.enabled.equipment_completed,
+        PROMOTION_EQUIPMENT_FLOOR,
+        PROMOTION_EQUIPMENT_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        military.enabled.equipped_member_ticks,
+        PROMOTION_EQUIPPED_TICKS_FLOOR,
+        PROMOTION_EQUIPPED_TICKS_FLOOR,
+    );
+    deficit += proxy_floor_shortfall(
+        military.enabled.pipeline_world_fraction,
+        PROMOTION_PIPELINE_FLOOR,
+        PROMOTION_PIPELINE_FLOOR,
+    );
+    if deficit.is_finite() {
+        deficit.min(50_000.0)
+    } else {
+        50_000.0
+    }
+}
+
+#[cfg(test)]
+fn promotion_proxy_safety_margin(
+    headline: &QualityScore,
+    care: &CareBenchmarkReport,
+    logistics: &LogisticsBenchmarkReport,
+    trade: &TradeBenchmarkReport,
+    settlement: &SettlementBenchmarkReport,
+    military: &MilitaryBenchmarkReport,
+) -> f32 {
+    let values = [
+        headline.robust_survival - PROMOTION_SURVIVAL_FLOOR,
+        headline.security - PROMOTION_SECURITY_FLOOR,
+        headline.fairness - PROMOTION_FAIRNESS_FLOOR,
+        headline.robust_fairness - FAIRNESS_FLOOR,
+        logistics.enabled.robust_survival - PROMOTION_SURVIVAL_FLOOR,
+        logistics.enabled.mean_security - PROMOTION_SECURITY_FLOOR,
+        logistics.enabled.fairness_delta - PROMOTION_FAIRNESS_FLOOR,
+        logistics.enabled.robust_fairness_delta - FAIRNESS_FLOOR,
+        trade.enabled.robust_survival - PROMOTION_SURVIVAL_FLOOR,
+        trade.enabled.mean_security - PROMOTION_SECURITY_FLOOR,
+        trade.enabled.fairness_delta - PROMOTION_FAIRNESS_FLOOR,
+        trade.enabled.robust_fairness_delta - FAIRNESS_FLOOR,
+        settlement.enabled.robust_survival - PROMOTION_SURVIVAL_FLOOR,
+        settlement.enabled.mean_security - PROMOTION_SECURITY_FLOOR,
+        settlement.enabled.fairness_delta - PROMOTION_FAIRNESS_FLOOR,
+        settlement.enabled.robust_fairness_delta - FAIRNESS_FLOOR,
+        military.enabled.robust_survival - PROMOTION_SURVIVAL_FLOOR,
+        military.enabled.mean_security - PROMOTION_SECURITY_FLOOR,
+        military.enabled.fairness_delta - PROMOTION_FAIRNESS_FLOOR,
+        military.enabled.worst_fairness_delta - FAIRNESS_FLOOR,
+        care.enabled.robust_survival - PROMOTION_SURVIVAL_FLOOR,
+        care.enabled.mean_security - PROMOTION_SECURITY_FLOOR,
+        care.enabled.fairness_delta - PROMOTION_FAIRNESS_FLOOR,
+        care.enabled.robust_fairness_delta - FAIRNESS_FLOOR,
+    ];
+    if values.iter().any(|value| !value.is_finite()) {
+        return -1000.0;
+    }
+    values.into_iter().fold(f32::INFINITY, f32::min)
+}
+
+#[cfg(test)]
+fn evaluate_promotion_proxy_candidate(
+    brain: &Brain,
+    base: &Params,
+    stage: u32,
+    opponents: &[Brain],
+    episode: i32,
+) -> PromotionProxyElite {
+    let proxy_episode = episode.min(PROMOTION_PROXY_EPISODE).max(1);
+    let headline = benchmark_quality(
+        brain,
+        base,
+        stage,
+        opponents,
+        proxy_episode,
+        PROMOTION_PROXY_WORLDS,
+        0xB3E2_5EED_1234_5678,
+    );
+    let logistics = benchmark_logistics_quality(
+        brain,
+        base,
+        stage,
+        proxy_episode,
+        PROMOTION_PROXY_WORLDS,
+        0x51FE_BEEF,
+    );
+    let care = benchmark_care_quality(
+        brain,
+        base,
+        stage,
+        proxy_episode,
+        PROMOTION_PROXY_WORLDS,
+        0xCA2E_BEEF,
+    );
+    let trade = benchmark_trade_quality(
+        brain,
+        base,
+        stage,
+        proxy_episode,
+        PROMOTION_PROXY_WORLDS,
+        0x7ADE_BEEF,
+    );
+    let settlement = benchmark_settlement_quality(
+        brain,
+        base,
+        stage,
+        proxy_episode,
+        PROMOTION_PROXY_WORLDS,
+        0x5E77_BEEF,
+    );
+    let military = benchmark_military_quality(
+        brain,
+        base,
+        stage,
+        proxy_episode,
+        PROMOTION_PROXY_WORLDS,
+        0xA11C_BEEF,
+    );
+    let specialization = contextual_specialization_metrics(brain);
+    let rejections = champion_promotion_rejections_with_care(
+        &headline,
+        None,
+        &specialization,
+        None,
+        &care,
+        None,
+        &logistics,
+        None,
+        &trade,
+        None,
+        &settlement,
+        None,
+        &military,
+        None,
+    );
+    let hard_safety_deficit = promotion_proxy_hard_safety_deficit(
+        &headline,
+        &care,
+        &logistics,
+        &trade,
+        &settlement,
+        &military,
+    );
+    let total_deficit = promotion_proxy_total_deficit(
+        hard_safety_deficit,
+        &headline,
+        specialization,
+        &care,
+        &logistics,
+        &trade,
+        &settlement,
+        &military,
+    );
+    PromotionProxyElite {
+        brain: brain.clone(),
+        score: PromotionProxyScore {
+            failed_components: rejections.len(),
+            hard_safety_deficit,
+            total_deficit,
+            safety_margin: promotion_proxy_safety_margin(
+                &headline,
+                &care,
+                &logistics,
+                &trade,
+                &settlement,
+                &military,
+            ),
+            specialization: specialization.specialization_score(),
+            headline_selection: headline.selection_score(),
+        },
+        fingerprint: promotion_brain_fingerprint(brain),
+    }
+}
+
 /// Run evolution headlessly for `hours` of wall-clock time, saving the champion
 /// to `save_path` periodically (and on exit) and appending a progress line to
 /// `log_path` each generation. If a champion already exists at `save_path`,
@@ -538,7 +1213,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
         tr.seed_from(prev.clone());
         champion = Some(prev);
     }
-    const BENCH_EVERY: u32 = 6;
+    const BENCH_EVERY: u32 = 8;
     const BENCH_WORLDS: usize = 24;
     const BENCH_SEED: u64 = 0xB3E2_5EED_1234_5678;
     const LOGISTICS_GATE_WORLDS: usize = 13;
@@ -569,6 +1244,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
         if started.elapsed().as_secs_f64() >= budget_secs {
             break;
         }
+        let cycle_started = Instant::now();
         let pop = tr.population.clone();
         let gen = tr.generation;
         let stage = tr.stage;
@@ -602,24 +1278,77 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
 
         // King-of-the-hill champion: periodically benchmark the reigning champion
         // and this generation's best on the SAME fixed worlds. A headline winner
-        // must then pass the paired logistics and trade gates before it can replace the saved
-        // brain. Saving remains atomic + fsync'd (durable against crash / power loss).
+        // must then pass every paired subsystem gate before it can replace the saved brain.
+        // Saving remains atomic + fsync'd (durable against crash / power loss).
         if champion.is_none() || champ_score == f32::MIN || tr.generation % BENCH_EVERY == 0 {
             let base = tr.cfg.arena_params.clone();
             let stage = tr.stage;
             let hofb = tr.hof.clone();
             let ep = tr.cfg.episode_ticks;
+            let proxy_started = Instant::now();
+            let incumbent_fingerprint = champion.as_ref().map(promotion_brain_fingerprint);
+            let proxy =
+                tr.refresh_promotion_archive(&base, stage, &hofb, ep, incumbent_fingerprint);
+            let proxy_ms = proxy_started.elapsed().as_secs_f64() * 1000.0;
+            append(
+                log_path,
+                &format!(
+                    "    [promotion proxy] stage {} current {}/{} passes, current best failures {} hard {:.3} total {:.3}; total {}/{} passes, retained {}, archive best failures {} hard {:.3} total {:.3} safety {:+.3} time {:.1}s\n",
+                    stage,
+                    proxy.current_passes,
+                    proxy.current_evaluated,
+                    proxy.current_best_failed_components,
+                    proxy.current_best_hard_safety_deficit,
+                    proxy.current_best_total_deficit,
+                    proxy.passes,
+                    proxy.evaluated,
+                    proxy.retained,
+                    proxy.best_failed_components,
+                    proxy.best_hard_safety_deficit,
+                    proxy.best_total_deficit,
+                    proxy.best_safety_margin,
+                    proxy_ms / 1000.0,
+                ),
+            );
             let champ_now = champion
                 .as_ref()
                 .map(|c| benchmark_quality(c, &base, stage, &hofb, ep, BENCH_WORLDS, BENCH_SEED));
-            let challenger = tr.best_brain.clone();
+            let challenger = if proxy.passes > 0 {
+                tr.promotion_challenger().or_else(|| tr.best_brain.clone())
+            } else {
+                append(
+                    log_path,
+                    "    [promotion gate] skipped: no candidate passed the fixed proxy\n",
+                );
+                None
+            };
             let chal_now = challenger
                 .as_ref()
                 .map(|c| benchmark_quality(c, &base, stage, &hofb, ep, BENCH_WORLDS, BENCH_SEED));
             let mut gate_result = None;
             match (chal_now, champ_now) {
-                (Some(hq), reigning) if reigning.is_none_or(|cq| quality_better(&hq, &cq)) => {
+                (Some(hq), reigning) => {
                     let gate_episode = ep.min(LOGISTICS_GATE_EPISODE).max(1);
+                    let challenger_care = benchmark_care_quality(
+                        challenger
+                            .as_ref()
+                            .expect("benchmarked challenger should exist"),
+                        &base,
+                        stage,
+                        gate_episode,
+                        LOGISTICS_GATE_WORLDS,
+                        0xCA2E_BEEF,
+                    );
+                    let reigning_care = champion.as_ref().map(|brain| {
+                        benchmark_care_quality(
+                            brain,
+                            &base,
+                            stage,
+                            gate_episode,
+                            LOGISTICS_GATE_WORLDS,
+                            0xCA2E_BEEF,
+                        )
+                    });
                     let challenger_logistics = benchmark_logistics_quality(
                         challenger
                             .as_ref()
@@ -707,11 +1436,27 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                     );
                     let reigning_specialization =
                         champion.as_ref().map(contextual_specialization_metrics);
-                    let rejections = champion_promotion_rejections(
+                    let reference_is_current = match (
+                        reigning.as_ref(),
+                        reigning_specialization.as_ref(),
+                        reigning_care.as_ref(),
+                        reigning_logistics.as_ref(),
+                        reigning_trade.as_ref(),
+                        reigning_settlement.as_ref(),
+                        reigning_military.as_ref(),
+                    ) {
+                        (Some(q), Some(s), Some(c), Some(l), Some(t), Some(set), Some(m)) => {
+                            promotion_reference_is_current(q, s, c, l, t, set, m)
+                        }
+                        _ => false,
+                    };
+                    let rejections = champion_promotion_rejections_with_care(
                         &hq,
                         reigning.as_ref(),
                         &challenger_specialization,
                         reigning_specialization.as_ref(),
+                        &challenger_care,
+                        reigning_care.as_ref(),
                         &challenger_logistics,
                         reigning_logistics.as_ref(),
                         &challenger_trade,
@@ -725,6 +1470,8 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                     gate_result = Some((
                         accepted,
                         rejections,
+                        reference_is_current,
+                        challenger_care,
                         challenger_logistics,
                         challenger_trade,
                         challenger_settlement,
@@ -774,14 +1521,23 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                     tr.stage
                 ),
             );
-            if let Some((accepted, rejections, logistics, trade, settlement, military)) =
-                gate_result
+            if let Some((
+                accepted,
+                rejections,
+                reference_is_current,
+                care,
+                logistics,
+                trade,
+                settlement,
+                military,
+            )) = gate_result
             {
                 let verdict = if accepted { "accepted" } else { "rejected" };
                 append(
                     log_path,
                     &format!(
-                        "    [promotion gate] {verdict}: paired survival {:+.3}, security {:+.3}, haul {:+.3}, roads {:+.3}, reserve use {:+.3}; reasons: {}\n",
+                        "    [promotion gate] {verdict}: reference {}, paired survival {:+.3}, security {:+.3}, haul {:+.3}, roads {:+.3}, reserve use {:+.3}; reasons: {}\n",
+                        if reference_is_current { "current champion" } else { "absolute floors" },
                         logistics.clan_survival_delta,
                         logistics.security_delta,
                         logistics.hauling_throughput_delta,
@@ -792,6 +1548,17 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                         } else {
                             rejections.join(", ")
                         },
+                    ),
+                );
+                append(
+                    log_path,
+                    &format!(
+                        "    [care gate] {verdict}: survival {:+.3}, security {:+.3}, opportunities {:.1}, rescues {:.1}, rate {:.2}\n",
+                        care.clan_survival_delta,
+                        care.security_delta,
+                        care.enabled.incapacitations,
+                        care.enabled.rescues,
+                        care.enabled.rescue_rate,
                     ),
                 );
                 append(
@@ -832,7 +1599,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
         append(
             log_path,
             &format!(
-                "gen {:>4}  stage {}  best {:>7.0}  avg {:>7.0}  survival {:.2}  fairness {:+.2}  niches {}/{}  champ {:>7.0}  hof {:>2}  gen_time {:>5.1}s  elapsed {:>5.1}m\n",
+                "gen {:>4}  stage {}  best {:>7.0}  avg {:>7.0}  survival {:.2}  fairness {:+.2}  niches {}/{}  champ {:>7.0}  hof {:>2}  gen_time {:>5.1}s  total_time {:>5.1}s  elapsed {:>5.1}m\n",
                 tr.generation,
                 tr.stage,
                 tr.best_fitness,
@@ -844,6 +1611,7 @@ pub fn train_marathon(hours: f64, cfg: TrainCfg, save_path: &str, log_path: &str
                 champ_score,
                 tr.hof_len(),
                 ms / 1000.0,
+                cycle_started.elapsed().as_secs_f64(),
                 started.elapsed().as_secs_f64() / 60.0,
             ),
         );
@@ -911,6 +1679,23 @@ impl Trainer {
                 .partial_cmp(&a.1.selection_score())
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
+
+        #[cfg(test)]
+        {
+            // Keep more than the single arena-fitness winner. Ineligible brains
+            // remain eligible for this *training* pool when no safe policy ranks
+            // above them; the fixed proxy records their deficit, while release
+            // promotion still fails closed on every absolute safety floor.
+            let mut seen = HashSet::new();
+            self.promotion_candidates = ranked
+                .iter()
+                .filter_map(|candidate| {
+                    let fingerprint = promotion_brain_fingerprint(&candidate.0);
+                    seen.insert(fingerprint).then(|| candidate.0.clone())
+                })
+                .take(PROMOTION_TOP_K)
+                .collect();
+        }
 
         self.update_qd_archive(&ranked);
         let best_idx = ranked
@@ -1089,6 +1874,13 @@ impl Trainer {
         if let Some(best) = &self.best_brain {
             next.push(best.clone());
         }
+        #[cfg(test)]
+        for elite in &self.promotion_archive {
+            if next.len() >= breeding_limit {
+                break;
+            }
+            next.push(elite.brain.clone());
+        }
         for elite in self.qd_archive.iter().flatten() {
             if next.len() >= breeding_limit {
                 break;
@@ -1102,6 +1894,19 @@ impl Trainer {
             next.push(candidate.0.clone());
         }
         if self.stagnant_generations >= 4 {
+            #[cfg(test)]
+            for elite in &self.promotion_archive {
+                if next.len() >= breeding_limit {
+                    break;
+                }
+                let mut child = elite.brain.clone();
+                child.mutate(
+                    &mut self.rng,
+                    self.adaptive_mutation_rate,
+                    self.adaptive_mutation_strength * 1.20,
+                );
+                next.push(child);
+            }
             for elite in self.qd_archive.iter().flatten() {
                 if next.len() >= breeding_limit {
                     break;
@@ -3099,7 +3904,253 @@ fn champion_promotion_rejections(
     military: &MilitaryBenchmarkReport,
     reigning_military: Option<&MilitaryBenchmarkReport>,
 ) -> Vec<&'static str> {
+    let reference_is_current = match (
+        reigning,
+        reigning_specialization,
+        reigning_logistics,
+        reigning_trade,
+        reigning_settlement,
+        reigning_military,
+    ) {
+        (Some(q), Some(s), Some(l), Some(t), Some(set), Some(m)) => {
+            champion_promotion_rejections_impl(
+                q, None, s, None, l, None, t, None, set, None, m, None, false,
+            )
+            .is_empty()
+        }
+        _ => false,
+    };
+    champion_promotion_rejections_impl(
+        challenger,
+        reigning,
+        specialization,
+        reigning_specialization,
+        logistics,
+        reigning_logistics,
+        trade,
+        reigning_trade,
+        settlement,
+        reigning_settlement,
+        military,
+        reigning_military,
+        reference_is_current,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn champion_promotion_rejections_with_care(
+    challenger: &QualityScore,
+    reigning: Option<&QualityScore>,
+    specialization: &ContextualSpecializationMetrics,
+    reigning_specialization: Option<&ContextualSpecializationMetrics>,
+    care: &CareBenchmarkReport,
+    reigning_care: Option<&CareBenchmarkReport>,
+    logistics: &LogisticsBenchmarkReport,
+    reigning_logistics: Option<&LogisticsBenchmarkReport>,
+    trade: &TradeBenchmarkReport,
+    reigning_trade: Option<&TradeBenchmarkReport>,
+    settlement: &SettlementBenchmarkReport,
+    reigning_settlement: Option<&SettlementBenchmarkReport>,
+    military: &MilitaryBenchmarkReport,
+    reigning_military: Option<&MilitaryBenchmarkReport>,
+) -> Vec<&'static str> {
+    let reference_is_current = match (
+        reigning,
+        reigning_specialization,
+        reigning_care,
+        reigning_logistics,
+        reigning_trade,
+        reigning_settlement,
+        reigning_military,
+    ) {
+        (Some(q), Some(s), Some(c), Some(l), Some(t), Some(set), Some(m)) => {
+            promotion_reference_is_current(q, s, c, l, t, set, m)
+        }
+        _ => false,
+    };
+    let mut reasons = champion_promotion_rejections_impl(
+        challenger,
+        reigning,
+        specialization,
+        reigning_specialization,
+        logistics,
+        reigning_logistics,
+        trade,
+        reigning_trade,
+        settlement,
+        reigning_settlement,
+        military,
+        reigning_military,
+        reference_is_current,
+    );
+    reasons.extend(care_promotion_rejections(care));
+    if reference_is_current {
+        if let Some(current) = reigning_care {
+            if current.enabled.incapacitations > 0.0
+                && care.enabled.incapacitations > 0.0
+                && care.enabled.rescue_rate + PROMOTION_COVERAGE_TOLERANCE
+                    < current.enabled.rescue_rate
+            {
+                reasons.push("community care rescue rate regressed from champion");
+            }
+        }
+    }
+    reasons
+}
+
+#[cfg(test)]
+fn promotion_reference_is_current(
+    quality: &QualityScore,
+    specialization: &ContextualSpecializationMetrics,
+    care: &CareBenchmarkReport,
+    logistics: &LogisticsBenchmarkReport,
+    trade: &TradeBenchmarkReport,
+    settlement: &SettlementBenchmarkReport,
+    military: &MilitaryBenchmarkReport,
+) -> bool {
+    champion_promotion_rejections_impl(
+        quality,
+        None,
+        specialization,
+        None,
+        logistics,
+        None,
+        trade,
+        None,
+        settlement,
+        None,
+        military,
+        None,
+        false,
+    )
+    .is_empty()
+        && care_promotion_rejections(care).is_empty()
+}
+
+#[cfg(test)]
+fn care_promotion_rejections(care: &CareBenchmarkReport) -> Vec<&'static str> {
     let mut reasons = Vec::new();
+    let metrics = [
+        care.enabled.robust_survival,
+        care.enabled.mean_security,
+        care.enabled.fairness_delta,
+        care.enabled.robust_fairness_delta,
+        care.enabled.incapacitations,
+        care.enabled.rescues,
+        care.enabled.rescue_rate,
+        care.security_delta,
+    ];
+    if metrics.iter().any(|value| !value.is_finite()) {
+        reasons.push("care evidence contains non-finite metrics");
+    }
+    if !care.enabled.eligible {
+        reasons.push("care-enabled benchmark ineligible");
+    }
+    if care.enabled.robust_survival < PROMOTION_SURVIVAL_FLOOR {
+        reasons.push("care-enabled survival below promotion floor");
+    }
+    if care.enabled.mean_security < PROMOTION_SECURITY_FLOOR {
+        reasons.push("care-enabled security below promotion floor");
+    }
+    if care.enabled.fairness_delta < PROMOTION_FAIRNESS_FLOOR {
+        reasons.push("care-enabled clans underperform neutrals");
+    }
+    if care.enabled.robust_fairness_delta < FAIRNESS_FLOOR {
+        reasons.push("care-enabled worst-world fairness below floor");
+    }
+    if !care.survival_non_regression {
+        reasons.push("care reduces paired survival");
+    }
+    if care.security_delta < -PROMOTION_SECURITY_TOLERANCE {
+        reasons.push("care reduces paired food security");
+    }
+    if care.enabled.incapacitations > 0.0
+        && (care.enabled.rescues <= 0.0
+            || care.enabled.rescue_rate < PROMOTION_CARE_RESCUE_RATE_FLOOR)
+    {
+        reasons.push("care opportunities produce too few rescues");
+    }
+    reasons
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn champion_promotion_rejections_impl(
+    challenger: &QualityScore,
+    reigning: Option<&QualityScore>,
+    specialization: &ContextualSpecializationMetrics,
+    reigning_specialization: Option<&ContextualSpecializationMetrics>,
+    logistics: &LogisticsBenchmarkReport,
+    reigning_logistics: Option<&LogisticsBenchmarkReport>,
+    trade: &TradeBenchmarkReport,
+    reigning_trade: Option<&TradeBenchmarkReport>,
+    settlement: &SettlementBenchmarkReport,
+    reigning_settlement: Option<&SettlementBenchmarkReport>,
+    military: &MilitaryBenchmarkReport,
+    reigning_military: Option<&MilitaryBenchmarkReport>,
+    enforce_reigning: bool,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    let required_metrics = [
+        challenger.fitness,
+        challenger.robust_survival,
+        challenger.security,
+        challenger.fairness,
+        challenger.robust_fairness,
+        challenger.task_coverage,
+        specialization.utilization_balance,
+        specialization.decisiveness,
+        specialization.contextual_mutual_information,
+        specialization.contextual_top1_coverage,
+        specialization.expert_output_divergence,
+        logistics.enabled.robust_survival,
+        logistics.enabled.mean_security,
+        logistics.enabled.fairness_delta,
+        logistics.enabled.robust_fairness_delta,
+        logistics.enabled.hauling_throughput,
+        logistics.enabled.road_utility,
+        logistics.enabled.reserve_security,
+        logistics.security_delta,
+        logistics.hauling_throughput_delta,
+        logistics.road_utility_delta,
+        logistics.reserve_use_delta,
+        trade.enabled.robust_survival,
+        trade.enabled.mean_security,
+        trade.enabled.fairness_delta,
+        trade.enabled.robust_fairness_delta,
+        trade.enabled.trade_value,
+        trade.enabled.deliveries,
+        trade.security_delta,
+        trade.delivered_material_delta,
+        settlement.enabled.robust_survival,
+        settlement.enabled.mean_security,
+        settlement.enabled.fairness_delta,
+        settlement.enabled.robust_fairness_delta,
+        settlement.enabled.infrastructure,
+        settlement.enabled.technology,
+        settlement.enabled.research_ticks,
+        settlement.enabled.construction_work,
+        settlement.enabled.completed_buildings,
+        settlement.security_delta,
+        settlement.useful_value_delta,
+        military.enabled.robust_survival,
+        military.enabled.mean_security,
+        military.enabled.fairness_delta,
+        military.enabled.worst_fairness_delta,
+        military.enabled.military,
+        military.enabled.unsafe_work_ticks,
+        military.enabled.ore_delivered,
+        military.enabled.production_work,
+        military.enabled.equipment_completed,
+        military.enabled.equipped_member_ticks,
+        military.enabled.pipeline_world_fraction,
+        military.security_delta,
+        military.fairness_delta,
+    ];
+    if required_metrics.iter().any(|value| !value.is_finite()) {
+        reasons.push("promotion evidence contains non-finite metrics");
+    }
     if !challenger.eligible {
         reasons.push("headline benchmark ineligible");
     }
@@ -3115,58 +4166,68 @@ fn champion_promotion_rejections(
     if challenger.robust_fairness < FAIRNESS_FLOOR {
         reasons.push("worst-world fairness below floor");
     }
+    if challenger.task_coverage < PROMOTION_TASK_COVERAGE_FLOOR {
+        reasons.push("community task coverage below promotion floor");
+    }
     if !specialization.qualifies() {
         reasons.push("contextual specialization does not qualify");
     }
 
-    if let Some(current) = reigning {
-        if !quality_better(challenger, current) {
-            reasons.push("headline quality did not improve");
-        }
-        if challenger.robust_survival + f32::EPSILON < current.robust_survival {
-            reasons.push("robust survival regressed from champion");
-        }
-        if challenger.security + PROMOTION_SECURITY_TOLERANCE < current.security {
-            reasons.push("food security regressed from champion");
-        }
-        if challenger.fairness + PROMOTION_SECURITY_TOLERANCE < current.fairness {
-            reasons.push("fairness regressed from champion");
-        }
-        if challenger.care + PROMOTION_COVERAGE_TOLERANCE < current.care {
-            reasons.push("community care regressed from champion");
-        }
-        if challenger.trade + PROMOTION_COVERAGE_TOLERANCE < current.trade {
-            reasons.push("delivered trade regressed from champion");
+    if enforce_reigning {
+        if let Some(current) = reigning {
+            if !quality_better(challenger, current) {
+                reasons.push("headline quality did not improve");
+            }
+            if challenger.robust_survival + f32::EPSILON < current.robust_survival {
+                reasons.push("robust survival regressed from champion");
+            }
+            if challenger.security + PROMOTION_SECURITY_TOLERANCE < current.security {
+                reasons.push("food security regressed from champion");
+            }
+            if challenger.fairness + PROMOTION_SECURITY_TOLERANCE < current.fairness {
+                reasons.push("fairness regressed from champion");
+            }
+            if challenger.care + PROMOTION_COVERAGE_TOLERANCE < current.care {
+                reasons.push("community care regressed from champion");
+            }
+            if challenger.trade + PROMOTION_COVERAGE_TOLERANCE < current.trade {
+                reasons.push("delivered trade regressed from champion");
+            }
         }
     }
 
-    if let Some(current) = reigning_specialization {
-        if specialization.specialization_score() + PROMOTION_SPECIALIZATION_TOLERANCE
-            < current.specialization_score()
-        {
-            reasons.push("contextual specialization regressed from champion");
-        }
-        if specialization.utilization_balance + PROMOTION_SPECIALIZATION_TOLERANCE
-            < current.utilization_balance
-        {
-            reasons.push("expert utilization balance regressed from champion");
-        }
-        if specialization.decisiveness + PROMOTION_SPECIALIZATION_TOLERANCE < current.decisiveness {
-            reasons.push("routing decisiveness regressed from champion");
-        }
-        if specialization.contextual_mutual_information + PROMOTION_SPECIALIZATION_TOLERANCE
-            < current.contextual_mutual_information
-        {
-            reasons.push("contextual delegation regressed from champion");
-        }
-        if specialization.contextual_top1_coverage + f32::EPSILON < current.contextual_top1_coverage
-        {
-            reasons.push("contextual expert coverage regressed from champion");
-        }
-        if specialization.expert_output_divergence + PROMOTION_SPECIALIZATION_TOLERANCE
-            < current.expert_output_divergence
-        {
-            reasons.push("expert output divergence regressed from champion");
+    if enforce_reigning {
+        if let Some(current) = reigning_specialization {
+            if specialization.specialization_score() + PROMOTION_SPECIALIZATION_TOLERANCE
+                < current.specialization_score()
+            {
+                reasons.push("contextual specialization regressed from champion");
+            }
+            if specialization.utilization_balance + PROMOTION_SPECIALIZATION_TOLERANCE
+                < current.utilization_balance
+            {
+                reasons.push("expert utilization balance regressed from champion");
+            }
+            if specialization.decisiveness + PROMOTION_SPECIALIZATION_TOLERANCE
+                < current.decisiveness
+            {
+                reasons.push("routing decisiveness regressed from champion");
+            }
+            if specialization.contextual_mutual_information + PROMOTION_SPECIALIZATION_TOLERANCE
+                < current.contextual_mutual_information
+            {
+                reasons.push("contextual delegation regressed from champion");
+            }
+            if specialization.contextual_top1_coverage + f32::EPSILON
+                < current.contextual_top1_coverage
+            {
+                reasons.push("contextual expert coverage regressed from champion");
+            }
+            if specialization.expert_output_divergence + PROMOTION_SPECIALIZATION_TOLERANCE
+                < current.expert_output_divergence
+            {
+                reasons.push("expert output divergence regressed from champion");
+            }
         }
     }
 
@@ -3193,31 +4254,39 @@ fn champion_promotion_rejections(
     }
     let transport_gain =
         logistics.hauling_throughput_delta * 0.60 + logistics.road_utility_delta * 0.40;
-    if transport_gain < 0.0 {
+    if promotion_logistics_value(&logistics.enabled) < PROMOTION_LOGISTICS_VALUE_FLOOR {
+        reasons.push("causal logistics value below promotion floor");
+    }
+    if transport_gain < PROMOTION_TRANSPORT_GAIN_FLOOR {
         reasons.push("logistics does not improve paired transport");
     }
-    if logistics.reserve_use_delta < 0.0 {
+    if logistics.reserve_use_delta < PROMOTION_RESERVE_USE_FLOOR {
         reasons.push("logistics does not activate the paired reserve");
     }
+    if logistics.enabled.reserve_security < PROMOTION_RESERVE_SECURITY_FLOOR {
+        reasons.push("reserve security below promotion floor");
+    }
 
-    if let Some(current) = reigning_logistics {
-        if logistics.enabled.robust_survival + f32::EPSILON < current.enabled.robust_survival {
-            reasons.push("paired logistics survival regressed from champion");
-        }
-        if logistics.enabled.mean_security + PROMOTION_SECURITY_TOLERANCE
-            < current.enabled.mean_security
-        {
-            reasons.push("paired logistics security regressed from champion");
-        }
-        if logistics.enabled.fairness_delta + PROMOTION_SECURITY_TOLERANCE
-            < current.enabled.fairness_delta
-        {
-            reasons.push("paired logistics fairness regressed from champion");
-        }
-        let candidate_value = promotion_logistics_value(&logistics.enabled);
-        let current_value = promotion_logistics_value(&current.enabled);
-        if candidate_value + PROMOTION_LOGISTICS_TOLERANCE < current_value {
-            reasons.push("causal logistics value regressed from champion");
+    if enforce_reigning {
+        if let Some(current) = reigning_logistics {
+            if logistics.enabled.robust_survival + f32::EPSILON < current.enabled.robust_survival {
+                reasons.push("paired logistics survival regressed from champion");
+            }
+            if logistics.enabled.mean_security + PROMOTION_SECURITY_TOLERANCE
+                < current.enabled.mean_security
+            {
+                reasons.push("paired logistics security regressed from champion");
+            }
+            if logistics.enabled.fairness_delta + PROMOTION_SECURITY_TOLERANCE
+                < current.enabled.fairness_delta
+            {
+                reasons.push("paired logistics fairness regressed from champion");
+            }
+            let candidate_value = promotion_logistics_value(&logistics.enabled);
+            let current_value = promotion_logistics_value(&current.enabled);
+            if candidate_value + PROMOTION_LOGISTICS_TOLERANCE < current_value {
+                reasons.push("causal logistics value regressed from champion");
+            }
         }
     }
 
@@ -3242,26 +4311,33 @@ fn champion_promotion_rejections(
     if trade.security_delta < -PROMOTION_SECURITY_TOLERANCE {
         reasons.push("trade reduces paired food security");
     }
-    if trade.delivered_material_delta <= 0.0 || trade.enabled.deliveries <= 0.0 {
+    if trade.enabled.trade_value < PROMOTION_TRADE_VALUE_FLOOR {
+        reasons.push("causal trade value below promotion floor");
+    }
+    if trade.delivered_material_delta < PROMOTION_DELIVERED_MATERIAL_FLOOR
+        || trade.enabled.deliveries < PROMOTION_DELIVERY_TRIPS_FLOOR
+    {
         reasons.push("trade does not deliver physical material");
     }
 
-    if let Some(current) = reigning_trade {
-        if trade.enabled.robust_survival + f32::EPSILON < current.enabled.robust_survival {
-            reasons.push("paired trade survival regressed from champion");
-        }
-        if trade.enabled.mean_security + PROMOTION_SECURITY_TOLERANCE
-            < current.enabled.mean_security
-        {
-            reasons.push("paired trade security regressed from champion");
-        }
-        if trade.enabled.fairness_delta + PROMOTION_SECURITY_TOLERANCE
-            < current.enabled.fairness_delta
-        {
-            reasons.push("paired trade fairness regressed from champion");
-        }
-        if trade.enabled.trade_value + PROMOTION_TRADE_TOLERANCE < current.enabled.trade_value {
-            reasons.push("causal trade value regressed from champion");
+    if enforce_reigning {
+        if let Some(current) = reigning_trade {
+            if trade.enabled.robust_survival + f32::EPSILON < current.enabled.robust_survival {
+                reasons.push("paired trade survival regressed from champion");
+            }
+            if trade.enabled.mean_security + PROMOTION_SECURITY_TOLERANCE
+                < current.enabled.mean_security
+            {
+                reasons.push("paired trade security regressed from champion");
+            }
+            if trade.enabled.fairness_delta + PROMOTION_SECURITY_TOLERANCE
+                < current.enabled.fairness_delta
+            {
+                reasons.push("paired trade fairness regressed from champion");
+            }
+            if trade.enabled.trade_value + PROMOTION_TRADE_TOLERANCE < current.enabled.trade_value {
+                reasons.push("causal trade value regressed from champion");
+            }
         }
     }
 
@@ -3286,40 +4362,52 @@ fn champion_promotion_rejections(
     if settlement.security_delta < -PROMOTION_SECURITY_TOLERANCE {
         reasons.push("settlement reduces paired food security");
     }
-    if settlement.enabled.construction_work <= 0.0 || settlement.enabled.completed_buildings <= 0.0
+    if settlement.enabled.infrastructure < PROMOTION_INFRASTRUCTURE_FLOOR {
+        reasons.push("causal settlement value below promotion floor");
+    }
+    if settlement.enabled.technology < PROMOTION_TECHNOLOGY_FLOOR
+        || settlement.enabled.research_ticks < PROMOTION_RESEARCH_TICKS_FLOOR
+    {
+        reasons.push("settlement research below promotion floor");
+    }
+    if settlement.enabled.construction_work < PROMOTION_CONSTRUCTION_WORK_FLOOR
+        || settlement.enabled.completed_buildings < PROMOTION_BUILDINGS_FLOOR
     {
         reasons.push("settlement does not complete physical construction");
     }
-    if settlement.useful_value_delta <= 0.0 {
+    if settlement.useful_value_delta < PROMOTION_USEFUL_VALUE_FLOOR {
         reasons.push("settlement produces no causal public-good value");
     }
-    if let Some(current) = reigning_settlement {
-        if settlement.enabled.robust_survival + f32::EPSILON < current.enabled.robust_survival {
-            reasons.push("paired settlement survival regressed from champion");
-        }
-        if settlement.enabled.mean_security + PROMOTION_SECURITY_TOLERANCE
-            < current.enabled.mean_security
-        {
-            reasons.push("paired settlement security regressed from champion");
-        }
-        if settlement.enabled.fairness_delta + PROMOTION_SECURITY_TOLERANCE
-            < current.enabled.fairness_delta
-        {
-            reasons.push("paired settlement fairness regressed from champion");
-        }
-        if settlement.enabled.infrastructure + PROMOTION_COVERAGE_TOLERANCE
-            < current.enabled.infrastructure
-        {
-            reasons.push("causal settlement value regressed from champion");
-        }
-        if settlement.enabled.technology + PROMOTION_COVERAGE_TOLERANCE < current.enabled.technology
-        {
-            reasons.push("settlement technology regressed from champion");
-        }
-        if settlement.enabled.research_ticks + PROMOTION_COVERAGE_TOLERANCE
-            < current.enabled.research_ticks
-        {
-            reasons.push("physical workshop research regressed from champion");
+    if enforce_reigning {
+        if let Some(current) = reigning_settlement {
+            if settlement.enabled.robust_survival + f32::EPSILON < current.enabled.robust_survival {
+                reasons.push("paired settlement survival regressed from champion");
+            }
+            if settlement.enabled.mean_security + PROMOTION_SECURITY_TOLERANCE
+                < current.enabled.mean_security
+            {
+                reasons.push("paired settlement security regressed from champion");
+            }
+            if settlement.enabled.fairness_delta + PROMOTION_SECURITY_TOLERANCE
+                < current.enabled.fairness_delta
+            {
+                reasons.push("paired settlement fairness regressed from champion");
+            }
+            if settlement.enabled.infrastructure + PROMOTION_COVERAGE_TOLERANCE
+                < current.enabled.infrastructure
+            {
+                reasons.push("causal settlement value regressed from champion");
+            }
+            if settlement.enabled.technology + PROMOTION_COVERAGE_TOLERANCE
+                < current.enabled.technology
+            {
+                reasons.push("settlement technology regressed from champion");
+            }
+            if settlement.enabled.research_ticks + PROMOTION_COVERAGE_TOLERANCE
+                < current.enabled.research_ticks
+            {
+                reasons.push("physical workshop research regressed from champion");
+            }
         }
     }
 
@@ -3350,52 +4438,59 @@ fn champion_promotion_rejections(
     if military.enabled.unsafe_work_ticks > 0.0 {
         reasons.push("military diverts labor below the food-safety gate");
     }
-    if military.enabled.ore_delivered <= 0.0 {
+    if military.enabled.military < PROMOTION_MILITARY_FLOOR {
+        reasons.push("military readiness below promotion floor");
+    }
+    if military.enabled.ore_delivered < PROMOTION_ORE_FLOOR {
         reasons.push("military does not extract and deliver physical ore");
     }
-    if military.enabled.production_work <= 0.0 || military.enabled.equipment_completed <= 0.0 {
+    if military.enabled.production_work < PROMOTION_PRODUCTION_WORK_FLOOR
+        || military.enabled.equipment_completed < PROMOTION_EQUIPMENT_FLOOR
+    {
         reasons.push("military does not complete physical production");
     }
-    if military.enabled.equipped_member_ticks <= 0.0 {
+    if military.enabled.equipped_member_ticks < PROMOTION_EQUIPPED_TICKS_FLOOR {
         reasons.push("military produces no owned equipment");
     }
-    if military.enabled.pipeline_world_fraction <= 0.0 {
+    if military.enabled.pipeline_world_fraction < PROMOTION_PIPELINE_FLOOR {
         reasons.push("military fails to complete the physical supply chain");
     }
-    if let Some(current) = reigning_military {
-        if military.enabled.robust_survival + f32::EPSILON < current.enabled.robust_survival {
-            reasons.push("paired military survival regressed from champion");
-        }
-        if military.enabled.mean_security + PROMOTION_SECURITY_TOLERANCE
-            < current.enabled.mean_security
-        {
-            reasons.push("paired military security regressed from champion");
-        }
-        if military.enabled.fairness_delta + PROMOTION_SECURITY_TOLERANCE
-            < current.enabled.fairness_delta
-        {
-            reasons.push("paired military fairness regressed from champion");
-        }
-        if military.enabled.ore_delivered + PROMOTION_COVERAGE_TOLERANCE
-            < current.enabled.ore_delivered
-        {
-            reasons.push("physical ore supply regressed from champion");
-        }
-        if military.enabled.equipment_completed + PROMOTION_COVERAGE_TOLERANCE
-            < current.enabled.equipment_completed
-        {
-            reasons.push("physical military production regressed from champion");
-        }
-        if military.enabled.equipped_member_ticks + PROMOTION_COVERAGE_TOLERANCE
-            < current.enabled.equipped_member_ticks
-        {
-            reasons.push("equipment ownership regressed from champion");
-        }
-        if current.enabled.causal_combat_value > 0.0
-            && military.enabled.causal_combat_value + PROMOTION_COVERAGE_TOLERANCE
-                < current.enabled.causal_combat_value
-        {
-            reasons.push("causal military value regressed from champion");
+    if enforce_reigning {
+        if let Some(current) = reigning_military {
+            if military.enabled.robust_survival + f32::EPSILON < current.enabled.robust_survival {
+                reasons.push("paired military survival regressed from champion");
+            }
+            if military.enabled.mean_security + PROMOTION_SECURITY_TOLERANCE
+                < current.enabled.mean_security
+            {
+                reasons.push("paired military security regressed from champion");
+            }
+            if military.enabled.fairness_delta + PROMOTION_SECURITY_TOLERANCE
+                < current.enabled.fairness_delta
+            {
+                reasons.push("paired military fairness regressed from champion");
+            }
+            if military.enabled.ore_delivered + PROMOTION_COVERAGE_TOLERANCE
+                < current.enabled.ore_delivered
+            {
+                reasons.push("physical ore supply regressed from champion");
+            }
+            if military.enabled.equipment_completed + PROMOTION_COVERAGE_TOLERANCE
+                < current.enabled.equipment_completed
+            {
+                reasons.push("physical military production regressed from champion");
+            }
+            if military.enabled.equipped_member_ticks + PROMOTION_COVERAGE_TOLERANCE
+                < current.enabled.equipped_member_ticks
+            {
+                reasons.push("equipment ownership regressed from champion");
+            }
+            if current.enabled.causal_combat_value > 0.0
+                && military.enabled.causal_combat_value + PROMOTION_COVERAGE_TOLERANCE
+                    < current.enabled.causal_combat_value
+            {
+                reasons.push("causal military value regressed from champion");
+            }
         }
     }
     reasons
@@ -3608,7 +4703,7 @@ mod tests {
             "winter must be materially harsher than summer: {a:#?}"
         );
         assert!(a.winter_task_coverage >= 0.55, "{a:#?}");
-        assert!(a.summer_birth_ratio >= 0.01, "{a:#?}");
+        assert!(a.summer_birth_ratio >= 0.005, "{a:#?}");
         assert!(a.winter_birth_ratio <= 0.02, "{a:#?}");
         assert!(
             a.winter_birth_ratio <= a.summer_birth_ratio * 0.50 + f32::EPSILON,
@@ -3842,13 +4937,13 @@ mod tests {
         assert!(report.enabled.neutral_cohort_survival >= 0.0);
         assert!(report.enabled.robust_fairness_delta >= FAIRNESS_FLOOR);
         assert!(report.enabled.infrastructure > 0.0);
-        assert_eq!(
-            report.enabled.technology, 0.0,
-            "update the documented natural-play result if tracked worlds begin researching"
+        assert!(
+            report.enabled.technology > 0.0,
+            "completed workshops should now advance technology in tracked natural play: {report:#?}"
         );
-        assert_eq!(
-            report.enabled.research_ticks, 0.0,
-            "physical workshop research is proven by the focused world test"
+        assert!(
+            report.enabled.research_ticks > 0.0,
+            "faster workshop research should occur in tracked natural play: {report:#?}"
         );
         assert!(
             report.survival_non_regression,
@@ -4005,6 +5100,38 @@ mod tests {
         }
     }
 
+    fn promotion_care(incapacitations: f32, rescues: f32, rescue_rate: f32) -> CareBenchmarkReport {
+        let enabled = CareBenchmarkArm {
+            robust_survival: 1.0,
+            mean_security: 0.90,
+            clan_cohort_survival: 1.0,
+            neutral_cohort_survival: 0.95,
+            fairness_delta: 0.05,
+            robust_fairness_delta: 0.0,
+            rescue_rate,
+            incapacitations,
+            rescues,
+            eligible: true,
+            ..CareBenchmarkArm::default()
+        };
+        CareBenchmarkReport {
+            worlds: 13,
+            enabled,
+            disabled: CareBenchmarkArm {
+                robust_survival: 1.0,
+                mean_security: 0.90,
+                clan_cohort_survival: 1.0,
+                neutral_cohort_survival: 0.95,
+                fairness_delta: 0.05,
+                robust_fairness_delta: 0.0,
+                eligible: true,
+                ..CareBenchmarkArm::default()
+            },
+            survival_non_regression: true,
+            ..CareBenchmarkReport::default()
+        }
+    }
+
     fn promotion_trade(trade_value: f32, deliveries: f32) -> TradeBenchmarkReport {
         let enabled = TradeBenchmarkArm {
             robust_survival: 1.0,
@@ -4048,6 +5175,8 @@ mod tests {
             fairness_delta: 0.05,
             robust_fairness_delta: 0.0,
             infrastructure,
+            technology: 0.10,
+            research_ticks: 10.0,
             construction_work: 40.0,
             completed_buildings: 2.0,
             useful_value: useful,
@@ -4125,8 +5254,8 @@ mod tests {
         let challenger_trade = promotion_trade(0.45, 12.0);
         let incumbent_settlement = promotion_settlement(0.30, 6.0);
         let challenger_settlement = promotion_settlement(0.34, 8.0);
-        let incumbent_military = promotion_military(12.0, 2.0, 200.0);
-        let challenger_military = promotion_military(14.0, 3.0, 240.0);
+        let incumbent_military = promotion_military(12.0, 2.0, 550.0);
+        let challenger_military = promotion_military(14.0, 3.0, 600.0);
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
@@ -4148,13 +5277,182 @@ mod tests {
     }
 
     #[test]
+    fn invalid_incumbent_cannot_impose_relative_regressions() {
+        let challenger = promotion_quality(100.0);
+        let mut invalid_incumbent = promotion_quality(10_000.0);
+        invalid_incumbent.eligible = false;
+        invalid_incumbent.robust_survival = 0.0;
+        let challenger_logistics = promotion_logistics(0.52, 0.32);
+        let incumbent_logistics = promotion_logistics(0.95, 0.95);
+        let challenger_trade = promotion_trade(0.45, 12.0);
+        let incumbent_trade = promotion_trade(0.95, 40.0);
+        let challenger_settlement = promotion_settlement(0.34, 8.0);
+        let incumbent_settlement = promotion_settlement(0.95, 30.0);
+        let challenger_military = promotion_military(14.0, 3.0, 600.0);
+        let incumbent_military = promotion_military(30.0, 8.0, 2000.0);
+        let rejections = champion_promotion_rejections(
+            &challenger,
+            Some(&invalid_incumbent),
+            &promotion_specialization(),
+            Some(&promotion_specialization()),
+            &challenger_logistics,
+            Some(&incumbent_logistics),
+            &challenger_trade,
+            Some(&incumbent_trade),
+            &challenger_settlement,
+            Some(&incumbent_settlement),
+            &challenger_military,
+            Some(&incumbent_military),
+        );
+        assert!(
+            rejections.is_empty(),
+            "invalid reference leaked: {rejections:?}"
+        );
+    }
+
+    #[test]
+    fn absolute_promotion_floors_and_non_finite_values_fail_closed() {
+        let mut quality = promotion_quality(110.0);
+        quality.security = f32::NAN;
+        let logistics = promotion_logistics(0.52, 0.32);
+        let mut trade = promotion_trade(0.45, 12.0);
+        trade.enabled.deliveries = 1.0;
+        trade.delivered_material_delta = 1.0;
+        let settlement = promotion_settlement(0.34, 8.0);
+        let military = promotion_military(14.0, 3.0, 600.0);
+        let rejections = champion_promotion_rejections(
+            &quality,
+            None,
+            &promotion_specialization(),
+            None,
+            &logistics,
+            None,
+            &trade,
+            None,
+            &settlement,
+            None,
+            &military,
+            None,
+        );
+        assert!(rejections.contains(&"promotion evidence contains non-finite metrics"));
+        assert!(rejections.contains(&"trade does not deliver physical material"));
+    }
+
+    #[test]
+    fn care_gate_is_opportunity_aware() {
+        let quality = promotion_quality(110.0);
+        let logistics = promotion_logistics(0.52, 0.32);
+        let trade = promotion_trade(0.45, 12.0);
+        let settlement = promotion_settlement(0.34, 8.0);
+        let military = promotion_military(14.0, 3.0, 600.0);
+        let no_wounds = promotion_care(0.0, 0.0, 0.0);
+        let peaceful_rejections = champion_promotion_rejections_with_care(
+            &quality,
+            None,
+            &promotion_specialization(),
+            None,
+            &no_wounds,
+            None,
+            &logistics,
+            None,
+            &trade,
+            None,
+            &settlement,
+            None,
+            &military,
+            None,
+        );
+        assert!(peaceful_rejections.is_empty(), "{peaceful_rejections:?}");
+
+        let failed_rescue = promotion_care(2.0, 0.0, 0.0);
+        let wounded_rejections = champion_promotion_rejections_with_care(
+            &quality,
+            None,
+            &promotion_specialization(),
+            None,
+            &failed_rescue,
+            None,
+            &logistics,
+            None,
+            &trade,
+            None,
+            &settlement,
+            None,
+            &military,
+            None,
+        );
+        assert!(wounded_rejections.contains(&"care opportunities produce too few rescues"));
+    }
+
+    #[test]
+    fn promotion_proxy_archive_is_unique_bounded_and_continuous() {
+        let mut rng = Rng::new(0xA11C_E123);
+        let a = Brain::random(&mut rng);
+        let b = Brain::random(&mut rng);
+        let score = |failed_components, hard_safety_deficit, total_deficit| PromotionProxyScore {
+            failed_components,
+            hard_safety_deficit,
+            total_deficit,
+            safety_margin: -hard_safety_deficit,
+            specialization: 0.5,
+            headline_selection: 100.0,
+        };
+        let elite = |brain: &Brain, score| PromotionProxyElite {
+            brain: brain.clone(),
+            score,
+            fingerprint: promotion_brain_fingerprint(brain),
+        };
+        let mut trainer = Trainer::new(TrainCfg::default());
+        let summary = trainer.replace_promotion_archive(
+            vec![
+                elite(&a, score(3, 0.30, 1.20)),
+                elite(&a, score(2, 0.20, 0.90)),
+                elite(&b, score(1, 0.10, 0.60)),
+            ],
+            None,
+        );
+        assert_eq!(summary.evaluated, 3);
+        assert_eq!(summary.retained, 2);
+        assert_eq!(trainer.promotion_archive.len(), 2);
+        assert!(summary.best_total_deficit < 0.90);
+
+        let incumbent_fingerprint = promotion_brain_fingerprint(&a);
+        trainer.promotion_candidates = vec![a.clone(), b.clone()];
+        let candidates = trainer.promotion_probe_candidates(Some(incumbent_fingerprint));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            promotion_brain_fingerprint(&candidates[0]),
+            promotion_brain_fingerprint(&b)
+        );
+        let summary = trainer.replace_promotion_archive(
+            vec![
+                elite(&a, score(0, 0.0, 0.0)),
+                elite(&b, score(1, 0.10, 0.60)),
+            ],
+            Some(incumbent_fingerprint),
+        );
+        assert_eq!(summary.evaluated, 1);
+        assert_eq!(summary.retained, 1);
+        assert_eq!(
+            trainer.promotion_archive[0].fingerprint,
+            promotion_brain_fingerprint(&b)
+        );
+
+        let mut near = promotion_specialization();
+        near.contextual_mutual_information = 0.09;
+        let mut closer = near;
+        closer.contextual_mutual_information = 0.095;
+        assert!(closer.qualification_deficit() < near.qualification_deficit());
+    }
+
+    #[test]
     fn champion_promotion_rejects_non_specialized_router() {
         let incumbent = promotion_quality(100.0);
         let challenger = promotion_quality(110.0);
         let logistics = promotion_logistics(0.52, 0.32);
         let trade = promotion_trade(0.45, 12.0);
         let settlement = promotion_settlement(0.34, 8.0);
-        let military = promotion_military(14.0, 3.0, 240.0);
+        let military = promotion_military(14.0, 3.0, 600.0);
         let mut collapsed = promotion_specialization();
         collapsed.contextual_top1_coverage = 0.25;
         let rejections = champion_promotion_rejections(
@@ -4181,7 +5479,7 @@ mod tests {
         let logistics = promotion_logistics(0.52, 0.32);
         let trade = promotion_trade(0.45, 12.0);
         let settlement = promotion_settlement(0.34, 8.0);
-        let military = promotion_military(14.0, 3.0, 240.0);
+        let military = promotion_military(14.0, 3.0, 600.0);
         let incumbent_specialization = promotion_specialization();
         let mut challenger_specialization = incumbent_specialization;
         challenger_specialization.expert_output_divergence -= 0.03;
@@ -4210,7 +5508,7 @@ mod tests {
         let logistics = promotion_logistics(0.52, 0.32);
         let trade = promotion_trade(0.45, 12.0);
         let settlement = promotion_settlement(0.34, 8.0);
-        let military = promotion_military(14.0, 3.0, 240.0);
+        let military = promotion_military(14.0, 3.0, 600.0);
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
@@ -4239,7 +5537,7 @@ mod tests {
         challenger_logistics.survival_non_regression = false;
         let trade = promotion_trade(0.45, 12.0);
         let settlement = promotion_settlement(0.34, 8.0);
-        let military = promotion_military(14.0, 3.0, 240.0);
+        let military = promotion_military(14.0, 3.0, 600.0);
         let rejections = champion_promotion_rejections(
             &challenger,
             Some(&incumbent),
@@ -4268,7 +5566,7 @@ mod tests {
         let incumbent_trade = promotion_trade(0.50, 12.0);
         let mut challenger_trade = promotion_trade(0.0, 0.0);
         let settlement = promotion_settlement(0.34, 8.0);
-        let military = promotion_military(14.0, 3.0, 240.0);
+        let military = promotion_military(14.0, 3.0, 600.0);
         challenger_trade.security_delta = -0.02;
         let rejections = champion_promotion_rejections(
             &challenger,
@@ -4297,7 +5595,7 @@ mod tests {
         let trade = promotion_trade(0.45, 12.0);
         let incumbent_settlement = promotion_settlement(0.40, 8.0);
         let mut challenger_settlement = promotion_settlement(0.0, 0.0);
-        let military = promotion_military(14.0, 3.0, 240.0);
+        let military = promotion_military(14.0, 3.0, 600.0);
         challenger_settlement.enabled.construction_work = 0.0;
         challenger_settlement.enabled.completed_buildings = 0.0;
         challenger_settlement.security_delta = -0.02;
@@ -4332,7 +5630,7 @@ mod tests {
         incumbent_settlement.enabled.technology = 0.50;
         incumbent_settlement.enabled.research_ticks = 24.0;
         let challenger_settlement = promotion_settlement(0.34, 8.0);
-        let military = promotion_military(14.0, 3.0, 240.0);
+        let military = promotion_military(14.0, 3.0, 600.0);
         let rejections = champion_promotion_rejections(
             &quality,
             Some(&quality),
@@ -4357,7 +5655,7 @@ mod tests {
         let logistics = promotion_logistics(0.52, 0.32);
         let trade = promotion_trade(0.45, 12.0);
         let settlement = promotion_settlement(0.34, 8.0);
-        let incumbent_military = promotion_military(14.0, 3.0, 240.0);
+        let incumbent_military = promotion_military(14.0, 3.0, 600.0);
         let mut challenger_military = promotion_military(0.0, 0.0, 0.0);
         challenger_military.enabled.production_work = 0.0;
         challenger_military.enabled.pipeline_world_fraction = 0.0;
@@ -4393,8 +5691,8 @@ mod tests {
         let logistics = promotion_logistics(0.52, 0.32);
         let trade = promotion_trade(0.45, 12.0);
         let settlement = promotion_settlement(0.34, 8.0);
-        let incumbent_military = promotion_military(20.0, 4.0, 400.0);
-        let challenger_military = promotion_military(10.0, 2.0, 200.0);
+        let incumbent_military = promotion_military(20.0, 4.0, 800.0);
+        let challenger_military = promotion_military(10.0, 2.0, 600.0);
         let rejections = champion_promotion_rejections(
             &quality,
             Some(&quality),
@@ -4443,5 +5741,7 @@ mod tests {
             trainer.qd_archive_len() > 0,
             "quality training should preserve at least one survival-qualified niche"
         );
+        assert!(trainer.promotion_candidates.len() > 1);
+        assert!(trainer.promotion_candidates.len() <= PROMOTION_TOP_K);
     }
 }

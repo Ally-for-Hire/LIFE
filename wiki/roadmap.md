@@ -8,7 +8,8 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
 - **Watchable playground** — variable 1–5000 ticks/s, pan/zoom, click-to-inspect,
   toggleable panels, live graphs, one-click presets, a slider for every parameter.
 - **Grid-layer core** — typed-array terrain/owner/road/fertility/pellet layers,
-  an occupancy grid (one NPC per tile), O(1) ownership, deterministic per-world RNG.
+  a counted occupancy grid (at most three NPCs per tile), O(1) ownership, and
+  deterministic per-world RNG.
 - **Entities** — hunger/health, food memory (no wander-deaths), foraging
   (clan-food-first then survival).
 - **Clans + neural leaders** — leader brain picks the goal, workers implement it;
@@ -65,7 +66,7 @@ The project was rebuilt from the JS/HTML/Node prototype into a native Rust
 
 ## Buildings and technology V1
 
-Food-secure clans now spend harvested wood on physical one-cell construction
+Food-secure clans now spend harvested wood on physical reserved 3x3 construction
 sites. Expand workers complete houses, granaries, workshops, markets, and walls;
 Scout leaders perform research at workshops. The settlement ablation and
 promotion gate require construction, causal public-good value, survival, food
@@ -81,19 +82,21 @@ promotion gates, UI, and `LIFEWRLD` V3 persistence are implemented and verified.
 All planned civilization-layer milestones through Military Equipment V1 are now
 complete. Seasonal Reality V1 begins the next evidence-backed complexity cycle.
 
-## Next: Promotion-aware retraining
+## Done: Promotion-aware retraining
 
-- Evaluate a small top-K candidate pool instead of sending only the single
+- **Done:** evaluate a small top-K candidate pool instead of sending only the single
   highest arena-fitness brain to the promotion suite.
-- Add a cheap fixed-world promotion proxy during training and retain near-pass
+- **Done:** add a cheap fixed-world promotion proxy during training and retain near-pass
   candidates in a gate-deficit archive, so selection learns the same survival,
   fairness, care, trade, specialization, logistics, settlement, and military
   qualities required for release.
-- Keep absolute survival, security, and fairness floors. Apply incumbent-relative
+- **Done:** keep absolute survival, security, and fairness floors. Apply incumbent-relative
   non-regression checks only when the incumbent is eligible under the same current
   mechanics; otherwise compare against explicit safe subsystem floors.
-- Prove the proxy pass rate rises in a 30-60 minute diagnostic before starting
-  another eight-hour guarded marathon.
+- **Done:** a 30-minute exact-source diagnostic completed 156 generations through stage 4
+  and 20 proxy cycles. It produced 63/239 current-candidate proxy passes and 88/280
+  current-plus-archive passes, kept promotion overhead to 17.36% of wall time, rejected all
+  unsafe full-gate candidates, and left the tracked champion byte-identical.
 
 ## Engineering notes
 

@@ -367,7 +367,7 @@ passes 60 tests with one ignored marathon.
 ### A21 — Buildings & Technology V1
 
 Settlement progression now spends real harvested wood only after ordinary and
-reserve food buffers are full. Expand workers walk to one-cell sites and perform
+reserve food buffers are full. Expand workers walk to reserved building sites and perform
 construction; Scout leaders walk to workshops and research a fixed three-level
 technology progression. Houses, granaries, workshops, markets, and walls provide
 population/healing, reserve, research, trade, and defense value while keeping the
@@ -449,19 +449,85 @@ metabolism, and suppresses births. Completed roads bypass the winter surcharge.
 
 The UI exposes phase, mood, yield, transition timing, clan stores/member, and a
 seasonal graph. Phase state derives entirely from tick and existing parameters,
-so `LIFEWRLD` remains V3. A persistence test saves in winter and proves exact
+so seasons add no persisted fields. The current V4 envelope includes later physical
+loot/capacity/footprint state. A persistence test saves in winter and proves exact
 continuation across the spring boundary.
 
 The fixed 13-world, two-cycle amplitude-0.90 benchmark measures the second
 summer and winter after warmup. The tracked champion preserves **1.000** mean and
-robust winter clan survival and neutral parity. Food security falls from
-**0.927** in summer to **0.916** in winter; winter task coverage is **0.661**.
-Births contract from **0.014** in summer to **0.002** in winter. Summer stores
-fall **0.111 food/member** as the cohort grows, with no construction in that
-quarter; winter stores rise and natural reserve releases remain zero. Reserve
-use and summer building were therefore not added as promotion gates or claimed
-as observed outcomes. The integrated suite passes **111 tests** with one ignored
-marathon.
+robust winter clan survival and neutral parity. Food security edges from
+**0.924** in summer to **0.922** in winter; winter task coverage is **0.619**.
+Births contract from **0.0086** in summer to **0.0020** in winter. Summer stores
+grow **0.760 food/member**, with 2.77 construction work and 0.08 completed
+buildings per world; winter stores rise and natural reserve releases remain zero.
+Reserve use was therefore not added as a promotion gate or claimed as an observed
+outcome.
+
+## A25 — Combat lethality, civic tempo, and readable world symbols
+
+Default fed healing fell from **0.08 to 0.008 health/tick**. An unarmed attacker deals
+0.45 damage every 20 ticks, so targets now recover 0.16 rather than 1.6 between hits;
+combat can resolve instead of becoming an indefinitely regenerating furball. Community
+Care revival rises from 35% to 60% so a successful physical rescue still leaves a viable
+patient under the lower ambient rate.
+
+Technology now advances in ordinary play: completed Workshops add one baseline research
+tick every 30 simulation ticks, while a physically present Scout leader contributes every
+10 ticks. The 13-world paired settlement gate remains eligible at 1.000 robust survival,
++0.003 fairness, 0.932 security, 27.2 research ticks, and 0.10 normalized technology.
+
+Settlement placement reserves a clear **physical 3x3 footprint** around each building anchor.
+The viewport keeps exact simulation cells as the texture but adds screen-space silhouettes
+for houses, granaries, workshops, markets, and walls. Leaders receive gold rings; salient
+fighting, construction, research, trade, mining, starvation, and rescue states receive
+colored activity rings. This deliberately makes the UI more legible than a raw 1:1 pixel map
+without changing simulation coordinates; current worlds persist the footprint in V4.
+
+## A26 — Physical death loot, concealment, and three-unit cells
+
+Every terminal death now emits a sorted persistent ground pile containing carried food,
+wood, dedicated trade cargo, and ore. Any active unit can steal a pile by occupying its
+cell; loot is left physically instead of transferred to the killer, while combat kill
+attribution remains intact. `LIFEWRLD` V4 stores these piles while V1-V3
+migrate with empty loot.
+
+Low-health non-leader Defend workers near home can enter a static Hiding goal when free of
+cargo/rescue/trade duties. Enemy clan detection range against the hider is 20% of normal,
+with adjacent contact still visible. The counted occupancy grid now permits three units per
+cell and rejects the fourth; rescue approach logic remains physical under stacking.
+
+The pre-change champion still preserves 1.000 robust survival and positive physical trade,
+but its strict paired trade gate fails on **-0.25 worst-world fairness**. The gate remains
+unchanged; only a challenger passing every survival, fairness, trade, settlement, military,
+and specialization requirement can replace it.
+
+## A27 — Promotion-aware guarded retraining
+
+The first post-mechanics marathon reached generation 1062 in 342.4 minutes with 173
+full-gate rejections and no acceptance. Rotating arenas showed 1.00 survival, but only the
+single arena-fitness winner was tested and the obsolete incumbent still imposed broad
+relative regressions despite failing the current fixed-world contract.
+
+Retraining now keeps the top twelve arena policies and a deterministic four-entry near-pass
+archive. Every eight generations, a six-world proxy measures exact failed components plus
+continuous safety/total shortfall, reintroduces retained policies and mutated descendants into
+breeding, and sends only a proxy passer to the full suite. The full gate adds opportunity-aware care and explicit
+causal floors for logistics, trade, construction/research, and military supply. All evidence
+fails closed on non-finite values. Incumbent-relative comparisons apply only when the
+incumbent passes the complete current contract; otherwise absolute floors remain mandatory.
+
+Scratch diagnostics can set `LIFE_TRAIN_CHAMPION` and `LIFE_TRAIN_LOG`, preserving the
+tracked `champion.bin`. Proxy logs separate current-generation from archive pass counts and
+report continuous deficits and timing.
+
+The exact-source 30-minute scratch diagnostic completed 156 generations through stage 4
+and 20 proxy cycles. Current candidates passed 63/239 proxy evaluations; the combined
+current/archive pool passed 88/280. Eighteen full gates rejected and two cycles skipped the
+full gate; no candidate was accepted. Promotion work consumed 17.36% of total wall time
+overall and 15.99% from generation 60 onward, meeting the under-20% budget. The closest
+stage-3 candidate met every continuous proxy component but remained headline-ineligible
+because its worst-world fairness was below the absolute floor. Both the scratch output and
+tracked champion retained the incumbent SHA-256, so the fail-closed path was preserved.
 
 ## Open ideas / next
 

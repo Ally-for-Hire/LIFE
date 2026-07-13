@@ -11,7 +11,7 @@ use crate::entity::Goal;
 use crate::military::{equipment_for, ore_cargo_for};
 use crate::settlement::{active_building_counts, BuildingKind};
 use crate::trainer::{arena_count, TrainCfg, Trainer};
-use crate::world::{Params, SeasonPhase, SeasonState, World};
+use crate::world::{building_footprint_cells, Params, SeasonPhase, SeasonState, World};
 use eframe::egui;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -427,8 +427,10 @@ impl LifeApp {
             } else {
                 0.25 + building.completion_fraction() * 0.55
             };
-            let idx = g.idx(building.x, building.y);
-            px[idx] = blend(px[idx], color, alpha);
+            for (x, y) in building_footprint_cells(g.size, building.x, building.y) {
+                let idx = g.idx(x, y);
+                px[idx] = blend(px[idx], color, alpha);
+            }
         }
         // stockpiles
         for c in &self.world.clans {
@@ -439,6 +441,12 @@ impl LifeApp {
                 if g.in_bounds(sx, sy) {
                     px[g.idx(sx, sy)] = egui::Color32::from_rgb(232, 212, 92);
                 }
+            }
+        }
+        // Dropped resources remain distinct from natural food and ore.
+        for pile in &self.world.ground_loot {
+            if g.in_bounds(pile.x, pile.y) {
+                px[g.idx(pile.x, pile.y)] = egui::Color32::from_rgb(236, 138, 62);
             }
         }
         // entities
@@ -477,6 +485,215 @@ impl LifeApp {
         egui::ColorImage {
             size: [w, w],
             pixels: px,
+        }
+    }
+
+    fn paint_world_icons(
+        &self,
+        painter: &egui::Painter,
+        clip: egui::Rect,
+        image: egui::Rect,
+        cell: f32,
+    ) {
+        if cell < 1.5 {
+            return;
+        }
+        let center = |x: i32, y: i32| {
+            image.min + egui::vec2((x as f32 + 0.5) * cell, (y as f32 + 0.5) * cell)
+        };
+        let building_radius = (cell * 1.35).clamp(5.0, 16.0);
+        for building in &self.world.buildings {
+            if building.is_destroyed() {
+                continue;
+            }
+            let c = center(building.x, building.y);
+            if !clip.expand(building_radius).contains(c) {
+                continue;
+            }
+            let color = match building.kind {
+                BuildingKind::House => egui::Color32::from_rgb(104, 164, 224),
+                BuildingKind::Granary => egui::Color32::from_rgb(222, 174, 72),
+                BuildingKind::Workshop => egui::Color32::from_rgb(166, 112, 204),
+                BuildingKind::Market => egui::Color32::from_rgb(64, 188, 174),
+                BuildingKind::Wall => egui::Color32::from_rgb(164, 170, 180),
+            };
+            let alpha = if building.is_complete() { 255 } else { 145 };
+            let fill =
+                egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha);
+            let stroke = egui::Stroke::new(1.3, lighten(color, 0.45));
+            match building.kind {
+                BuildingKind::House => {
+                    let body = egui::Rect::from_center_size(
+                        c + egui::vec2(0.0, building_radius * 0.25),
+                        egui::vec2(building_radius * 1.25, building_radius),
+                    );
+                    painter.rect_filled(body, 1.0, fill);
+                    painter.add(egui::Shape::convex_polygon(
+                        vec![
+                            c + egui::vec2(-building_radius * 0.8, -building_radius * 0.15),
+                            c + egui::vec2(0.0, -building_radius),
+                            c + egui::vec2(building_radius * 0.8, -building_radius * 0.15),
+                        ],
+                        fill,
+                        stroke,
+                    ));
+                }
+                BuildingKind::Granary => {
+                    let r =
+                        egui::Rect::from_center_size(c, egui::Vec2::splat(building_radius * 1.55));
+                    painter.rect_filled(r, 2.0, fill);
+                    for band in [-0.35, 0.15] {
+                        let y = c.y + building_radius * band;
+                        painter.line_segment(
+                            [egui::pos2(r.left(), y), egui::pos2(r.right(), y)],
+                            stroke,
+                        );
+                    }
+                }
+                BuildingKind::Workshop => {
+                    painter.circle_filled(c, building_radius * 0.72, fill);
+                    painter.circle_stroke(c, building_radius, stroke);
+                    painter.line_segment(
+                        [
+                            c - egui::vec2(building_radius, 0.0),
+                            c + egui::vec2(building_radius, 0.0),
+                        ],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [
+                            c - egui::vec2(0.0, building_radius),
+                            c + egui::vec2(0.0, building_radius),
+                        ],
+                        stroke,
+                    );
+                }
+                BuildingKind::Market => {
+                    let r = egui::Rect::from_center_size(
+                        c,
+                        egui::vec2(building_radius * 1.8, building_radius * 1.25),
+                    );
+                    painter.rect_filled(r, 1.0, fill);
+                    painter.line_segment(
+                        [
+                            egui::pos2(r.left(), c.y - building_radius * 0.2),
+                            egui::pos2(r.right(), c.y - building_radius * 0.2),
+                        ],
+                        stroke,
+                    );
+                    painter.line_segment(
+                        [egui::pos2(c.x, r.top()), egui::pos2(c.x, r.bottom())],
+                        stroke,
+                    );
+                }
+                BuildingKind::Wall => {
+                    let r = egui::Rect::from_center_size(
+                        c,
+                        egui::vec2(building_radius * 2.0, building_radius * 0.75),
+                    );
+                    painter.rect_filled(r, 1.0, fill);
+                    painter.rect_stroke(r, 1.0, stroke);
+                }
+            }
+            if !building.is_complete() {
+                let width = building_radius * 2.0 * building.completion_fraction();
+                painter.line_segment(
+                    [
+                        c + egui::vec2(-building_radius, building_radius + 2.0),
+                        c + egui::vec2(-building_radius + width, building_radius + 2.0),
+                    ],
+                    egui::Stroke::new(2.0, egui::Color32::WHITE),
+                );
+            }
+        }
+
+        let loot_radius = (cell * 0.5).clamp(2.5, 6.0);
+        for pile in &self.world.ground_loot {
+            let c = center(pile.x, pile.y);
+            if !clip.expand(loot_radius * 2.0).contains(c) {
+                continue;
+            }
+            let fill = egui::Color32::from_rgb(236, 138, 62);
+            let stroke = egui::Stroke::new(1.4, egui::Color32::from_rgb(92, 52, 30));
+            painter.add(egui::Shape::convex_polygon(
+                vec![
+                    c + egui::vec2(0.0, -loot_radius),
+                    c + egui::vec2(loot_radius, 0.0),
+                    c + egui::vec2(0.0, loot_radius),
+                    c + egui::vec2(-loot_radius, 0.0),
+                ],
+                fill,
+                stroke,
+            ));
+            painter.line_segment(
+                [
+                    c + egui::vec2(-loot_radius * 0.45, -loot_radius * 0.55),
+                    c + egui::vec2(loot_radius * 0.45, -loot_radius * 0.55),
+                ],
+                stroke,
+            );
+        }
+
+        let mut entity_counts = HashMap::new();
+        for entity in &self.world.entities {
+            *entity_counts.entry((entity.x, entity.y)).or_insert(0usize) += 1;
+        }
+        let mut entity_slots = HashMap::new();
+        for entity in &self.world.entities {
+            let key = (entity.x, entity.y);
+            let count = entity_counts[&key];
+            let slot = entity_slots.entry(key).or_insert(0usize);
+            let offset = match (count, *slot) {
+                (1, _) => egui::Vec2::ZERO,
+                (2, 0) => egui::vec2(-0.24 * cell, 0.0),
+                (2, _) => egui::vec2(0.24 * cell, 0.0),
+                (_, 0) => egui::vec2(-0.24 * cell, -0.20 * cell),
+                (_, 1) => egui::vec2(0.24 * cell, -0.20 * cell),
+                _ => egui::vec2(0.0, 0.24 * cell),
+            };
+            *slot += 1;
+            let entity_radius = if count == 1 {
+                (cell * 0.55).clamp(2.5, 6.0)
+            } else {
+                (cell * 0.32).clamp(2.0, 5.0)
+            };
+            let c = center(entity.x, entity.y) + offset;
+            if !clip.expand(entity_radius * 2.0).contains(c) {
+                continue;
+            }
+            let clan_color = self
+                .world
+                .clans
+                .iter()
+                .find(|clan| clan.id == entity.clan && !clan.disbanded)
+                .map(|clan| egui::Color32::from_rgb(clan.color[0], clan.color[1], clan.color[2]))
+                .unwrap_or(egui::Color32::from_gray(184));
+            painter.circle_filled(c, entity_radius, clan_color);
+            if entity.is_leader {
+                painter.circle_stroke(
+                    c,
+                    entity_radius + 1.8,
+                    egui::Stroke::new(1.5, egui::Color32::GOLD),
+                );
+            }
+            let activity = match entity.goal {
+                Goal::Fighting | Goal::Defending => Some(egui::Color32::RED),
+                Goal::Constructing | Goal::BuildingRoad => {
+                    Some(egui::Color32::from_rgb(244, 166, 72))
+                }
+                Goal::Researching => Some(egui::Color32::from_rgb(204, 132, 244)),
+                Goal::Trading | Goal::GuardingTrade => Some(egui::Color32::from_rgb(64, 220, 200)),
+                Goal::MiningOre | Goal::HaulingOre | Goal::ForgingEquipment => {
+                    Some(egui::Color32::from_rgb(190, 210, 224))
+                }
+                Goal::Starving => Some(egui::Color32::from_rgb(255, 72, 72)),
+                Goal::Incapacitated | Goal::Rescuing => Some(egui::Color32::from_rgb(255, 126, 72)),
+                Goal::Hiding => Some(egui::Color32::from_rgb(92, 128, 156)),
+                _ => None,
+            };
+            if let Some(color) = activity {
+                painter.circle_stroke(c, entity_radius + 3.5, egui::Stroke::new(2.0, color));
+            }
         }
     }
 
@@ -1267,6 +1484,7 @@ impl eframe::App for LifeApp {
                 let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
                 painter.image(tex.id(), img_rect, uv, egui::Color32::WHITE);
             }
+            self.paint_world_icons(&painter, rect, img_rect, cell);
 
             if let Some(e) = self.selected.and_then(|id| self.world.entity_by_id(id)) {
                 let p = img_rect.min + egui::vec2(e.x as f32 * cell, e.y as f32 * cell);

@@ -40,7 +40,7 @@ world) finds the strategies. See [prior-art.md](prior-art.md) and
 - **Determinism:** every `World` owns its own seeded PRNG — same seed, identical run.
 - **Performance:** the view reads sim memory directly; training fans independent
   arenas across all CPU cores via rayon.
-- **One NPC per tile:** movement is gated by a per-cell occupancy grid.
+- **Three NPCs per tile:** movement uses a counted occupancy grid and rejects a fourth unit.
 - **Community logistics:** sticky roles, renewable wood, traffic-shaped roads,
   and protected famine/disaster reserves create complementary village jobs;
   V1.1 adds a live ablation plus hauling/road-benefit evidence.
@@ -50,9 +50,10 @@ world) finds the strategies. See [prior-art.md](prior-art.md) and
   builds symmetric trust, and temporary partners gain non-aggression and passage.
 - **World persistence:** `world.lifeworld` is versioned, checksummed, validated,
   atomically replaced, and resumes the exact saved deterministic trajectory.
-- **Buildings and technology:** food-secure clans construct physical settlement
-  sites with Expand workers; Scout leaders research at workshops, and completed
-  buildings provide measured public goods behind a live causal ablation.
+- **Buildings and technology:** food-secure clans construct physical 3x3 settlement
+  sites with Expand workers; completed Workshops provide baseline research while
+  Scout leaders accelerate it, and buildings provide measured public goods behind
+  a live causal ablation.
 - **Military equipment:** one safe Gather miner hauls finite ore and an Expand
   smith physically forges entity-owned equipment at a Workshop; paired promotion
   proves the supply chain without rewarding violence over survival.
