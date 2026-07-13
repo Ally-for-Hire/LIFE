@@ -81,6 +81,20 @@ promotion gates, UI, and `LIFEWRLD` V3 persistence are implemented and verified.
 All planned civilization-layer milestones through Military Equipment V1 are now
 complete. Seasonal Reality V1 begins the next evidence-backed complexity cycle.
 
+## Next: Promotion-aware retraining
+
+- Evaluate a small top-K candidate pool instead of sending only the single
+  highest arena-fitness brain to the promotion suite.
+- Add a cheap fixed-world promotion proxy during training and retain near-pass
+  candidates in a gate-deficit archive, so selection learns the same survival,
+  fairness, care, trade, specialization, logistics, settlement, and military
+  qualities required for release.
+- Keep absolute survival, security, and fairness floors. Apply incumbent-relative
+  non-regression checks only when the incumbent is eligible under the same current
+  mechanics; otherwise compare against explicit safe subsystem floors.
+- Prove the proxy pass rate rises in a 30-60 minute diagnostic before starting
+  another eight-hour guarded marathon.
+
 ## Engineering notes
 
 - **Spatial index** — combat and target search currently rebuild a per-tick
